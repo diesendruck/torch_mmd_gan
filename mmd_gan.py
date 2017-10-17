@@ -309,9 +309,15 @@ for global_step in range(args.max_iter):
             f_dec_X_D = f_dec_X_D.view(f_dec_X_D.size(0), args.nc,
                                        args.image_size, args.image_size)
             f_dec_X_D.data = f_dec_X_D.data.mul(0.5).add(0.5)
-            vutils.save_image(y_fixed.data, '{0}/fake_samples_{1}.png'.format(args.experiment, gen_iterations))
-            vutils.save_image(f_dec_X_D.data, '{0}/decode_samples_{1}.png'.format(args.experiment, gen_iterations))
+            vutils.save_image(
+                y_fixed.data, '{0}/fake_samples_{1}.png'.format(
+                    args.experiment, gen_iterations))
+            vutils.save_image(
+                f_dec_X_D.data, '{0}/decode_samples_{1}.png'.format(
+                    args.experiment, gen_iterations))
 
     if global_step % 50 == 0:
-        torch.save(netG.state_dict(), '{0}/netG_iter_{1}.pth'.format(args.experiment, global_step))
-        torch.save(netD.state_dict(), '{0}/netD_iter_{1}.pth'.format(args.experiment, global_step))
+        torch.save(netG.state_dict(), '{0}/netG_iter_{1}.pth'.format(
+            args.experiment, global_step))
+        torch.save(netD.state_dict(), '{0}/netD_iter_{1}.pth'.format(
+            args.experiment, global_step))
