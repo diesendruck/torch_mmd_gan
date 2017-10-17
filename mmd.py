@@ -74,7 +74,7 @@ def mix_rbf_mmd2_and_ratio(X, Y, sigma_list, biased=True):
 
 # Weighted version of mix RBF squared MMD.
 def mix_rbf_mmd2_weighted(X, Y, sigma_list, t_mean=None, t_cov_inv=None,
-        biased=True, const_diagonal=False):
+        t_norm_const=None, biased=True, const_diagonal=False):
     assert(X.size(0) == Y.size(0))
     m = X.size(0)
 
@@ -94,41 +94,26 @@ def mix_rbf_mmd2_weighted(X, Y, sigma_list, t_mean=None, t_cov_inv=None,
     K_YY = K[m:, m:]
 
     # Get weights, and apply them to the kernel matrix for X's only.
-    '''
-    xt_ = Z - t_mean.t().expand_as(Z)
-    x_ = xt_.t()
-    pr = 1. - 0.5 * torch.exp(-10. * torch.mm(torch.mm(xt_, t_cov_inv), x_))
-    keeping_probs = torch.diag(pr).unsqueeze(1)
-    keeping_probs_horiz = keeping_probs.expand_as(pr)
-    keeping_probs_vert = keeping_probs_horiz.t()
-    p1_weights = 1. / keeping_probs_horiz
-    p2_weights = 1. / keeping_probs_vert
-    p1_weights_xx = p1_weights[:m, :m]
-    p1_weights_xy = p1_weights[:m, m:]
-    p2_weights_xx = p2_weights[:m, :m]
-    p1_weights_xx_normed = p1_weights_xx / (
-        p1_weights_xx.sum().unsqueeze(1).expand_as(p1_weights_xx))
-    p2_weights_xx_normed = p2_weights_xx / (
-        p2_weights_xx.sum().unsqueeze(1).expand_as(p2_weights_xx))
-    p1_weights_xy_normed = p1_weights_xy / (
-        p1_weights_xy.sum().unsqueeze(1).expand_as(p1_weights_xy))
-    Kw_XX = K[:m, :m] * p1_weights_xx_normed * p2_weights_xx_normed 
-    Kw_XY = K[:m, m:] * p1_weights_xy_normed
-    '''
     if t_mean is not None:
+        k = t_mean.size(0)
         xt_ = X - t_mean.t().expand_as(X)
         x_ = xt_.t()
-        pr = 1. - 0.5 * torch.exp(-10. * torch.mm(torch.mm(xt_, t_cov_inv), x_))
+        t_norm_const = 1.
+        thinning_kernel = (
+            torch.exp(-0.5 * torch.mm(torch.mm(xt_, t_cov_inv), x_)) /
+            t_norm_const)
+        pr = 1. - 0.5 * thinning_kernel
         keeping_probs = torch.diag(pr).unsqueeze(1)
         keeping_probs_horiz = keeping_probs.expand_as(pr)
         keeping_probs_vert = keeping_probs_horiz.t()
         p1_weights = 1. / keeping_probs_horiz
         p2_weights = 1. / keeping_probs_vert
+        p1p2_weights = p1_weights * p2_weights
         p1_weights_normed = p1_weights / (
             p1_weights.sum().unsqueeze(1).expand_as(p1_weights))
-        p2_weights_normed = p2_weights / (
-            p2_weights.sum().unsqueeze(1).expand_as(p2_weights))
-        Kw_XX = K[:m, :m] * p1_weights_normed * p2_weights_normed 
+        p1p2_weights_normed = p1p2_weights / (
+            p1p2_weights.sum().unsqueeze(1).expand_as(p1p2_weights))
+        Kw_XX = K[:m, :m] * p1p2_weights_normed
         Kw_XY = K[:m, m:] * p1_weights_normed
 
     # Get the various sums of kernels that we'll use
@@ -157,9 +142,8 @@ def mix_rbf_mmd2_weighted(X, Y, sigma_list, t_mean=None, t_cov_inv=None,
         mmd2_alt = (K_XX.sum() / (m * m) + K_YY.sum() / (m * m) -
                     2.0 * K_XY.sum() / (m * m))
         if t_mean is not None:
-            print 'Ran weighted MMD2'
-            pdb.set_trace()
-            mmd2 = Kw_XX.sum() + K_YY.sum() / (m * m) - 2.0 * Kw_XY.sum()
+            mmd2_w = Kw_XX.sum() + K_YY.sum() / (m * m) - 2.0 * Kw_XY.sum()
+            mmd2 = mmd2_w
     else:
         mmd2 = (Kt_XX_sum / (m * (m - 1))
             + Kt_YY_sum / (m * (m - 1))
