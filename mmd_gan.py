@@ -228,7 +228,8 @@ for global_step in range(args.max_iter):
             L2_AE_X_D = util.match(x.view(batch_size, -1), f_dec_X_D, 'L2')
             L2_AE_Y_D = util.match(y.view(batch_size, -1), f_dec_Y_D, 'L2')
 
-            errD = torch.sqrt(mmd2_D) + lambda_rg * one_side_errD - lambda_AE_X * L2_AE_X_D - lambda_AE_Y * L2_AE_Y_D
+            errD = (torch.sqrt(mmd2_D) + lambda_rg * one_side_errD -
+                lambda_AE_X * L2_AE_X_D - lambda_AE_Y * L2_AE_Y_D)
             errD.backward(mone)
             optimizerD.step()
 
