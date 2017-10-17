@@ -2,6 +2,7 @@
 # encoding: utf-8
 
 
+import pdb
 import torch
 
 min_var_est = 1e-8
@@ -59,11 +60,10 @@ def _mix_rbf_kernel(X, Y, sigma_list):
     return K[:m, :m], K[:m, m:], K[m:, m:], len(sigma_list)
 
 
-def mix_rbf_mmd2(X, Y, sigma_list, t_mean, t_cov_inv, biased=True):
+def mix_rbf_mmd2(X, Y, sigma_list, biased=True):
     K_XX, K_XY, K_YY, d = _mix_rbf_kernel(X, Y, sigma_list)
     # return _mmd2(K_XX, K_XY, K_YY, const_diagonal=d, biased=biased)
-    return _mmd2(K_XX, K_XY, K_YY, t_mean, t_cov_inv, const_diagonal=False,
-                 biased=biased)
+    return _mmd2(K_XX, K_XY, K_YY, const_diagonal=False, biased=biased)
 
 
 def mix_rbf_mmd2_and_ratio(X, Y, sigma_list, biased=True):
@@ -72,13 +72,108 @@ def mix_rbf_mmd2_and_ratio(X, Y, sigma_list, biased=True):
     return _mmd2_and_ratio(K_XX, K_XY, K_YY, const_diagonal=False, biased=biased)
 
 
+# Weighted version of mix RBF squared MMD.
+def mix_rbf_mmd2_weighted(X, Y, sigma_list, t_mean=None, t_cov_inv=None,
+        biased=True, const_diagonal=False):
+    assert(X.size(0) == Y.size(0))
+    m = X.size(0)
+
+    Z = torch.cat((X, Y), 0)
+    ZZT = torch.mm(Z, Z.t())
+    diag_ZZT = torch.diag(ZZT).unsqueeze(1)
+    Z_norm_sqr = diag_ZZT.expand_as(ZZT)
+    exponent = Z_norm_sqr - 2 * ZZT + Z_norm_sqr.t()
+
+    K = 0.0
+    for sigma in sigma_list:
+        gamma = 1.0 / (2 * sigma**2)
+        K += torch.exp(-gamma * exponent)
+
+    K_XX = K[:m, :m]
+    K_XY = K[:m, m:]
+    K_YY = K[m:, m:]
+
+    # Get weights, and apply them to the kernel matrix for X's only.
+    '''
+    xt_ = Z - t_mean.t().expand_as(Z)
+    x_ = xt_.t()
+    pr = 1. - 0.5 * torch.exp(-10. * torch.mm(torch.mm(xt_, t_cov_inv), x_))
+    keeping_probs = torch.diag(pr).unsqueeze(1)
+    keeping_probs_horiz = keeping_probs.expand_as(pr)
+    keeping_probs_vert = keeping_probs_horiz.t()
+    p1_weights = 1. / keeping_probs_horiz
+    p2_weights = 1. / keeping_probs_vert
+    p1_weights_xx = p1_weights[:m, :m]
+    p1_weights_xy = p1_weights[:m, m:]
+    p2_weights_xx = p2_weights[:m, :m]
+    p1_weights_xx_normed = p1_weights_xx / (
+        p1_weights_xx.sum().unsqueeze(1).expand_as(p1_weights_xx))
+    p2_weights_xx_normed = p2_weights_xx / (
+        p2_weights_xx.sum().unsqueeze(1).expand_as(p2_weights_xx))
+    p1_weights_xy_normed = p1_weights_xy / (
+        p1_weights_xy.sum().unsqueeze(1).expand_as(p1_weights_xy))
+    Kw_XX = K[:m, :m] * p1_weights_xx_normed * p2_weights_xx_normed 
+    Kw_XY = K[:m, m:] * p1_weights_xy_normed
+    '''
+    if t_mean is not None:
+        xt_ = X - t_mean.t().expand_as(X)
+        x_ = xt_.t()
+        pr = 1. - 0.5 * torch.exp(-10. * torch.mm(torch.mm(xt_, t_cov_inv), x_))
+        keeping_probs = torch.diag(pr).unsqueeze(1)
+        keeping_probs_horiz = keeping_probs.expand_as(pr)
+        keeping_probs_vert = keeping_probs_horiz.t()
+        p1_weights = 1. / keeping_probs_horiz
+        p2_weights = 1. / keeping_probs_vert
+        p1_weights_normed = p1_weights / (
+            p1_weights.sum().unsqueeze(1).expand_as(p1_weights))
+        p2_weights_normed = p2_weights / (
+            p2_weights.sum().unsqueeze(1).expand_as(p2_weights))
+        Kw_XX = K[:m, :m] * p1_weights_normed * p2_weights_normed 
+        Kw_XY = K[:m, m:] * p1_weights_normed
+
+    # Get the various sums of kernels that we'll use
+    # Kts drop the diagonal, but we don't need to compute them explicitly
+    if const_diagonal is not False:
+        diag_X = diag_Y = const_diagonal
+        sum_diag_X = sum_diag_Y = m * const_diagonal
+    else:
+        diag_X = torch.diag(K_XX)                       # (m,)
+        diag_Y = torch.diag(K_YY)                       # (m,)
+        sum_diag_X = torch.sum(diag_X)
+        sum_diag_Y = torch.sum(diag_Y)
+
+    Kt_XX_sums = K_XX.sum(dim=1) - diag_X  # \tilde{K}_XX * e = K_XX * e - diag_X
+    Kt_YY_sums = K_YY.sum(dim=1) - diag_Y  # \tilde{K}_YY * e = K_YY * e - diag_Y
+    K_XY_sums_0 = K_XY.sum(dim=0)  # K_{XY}^T * e
+
+    Kt_XX_sum = Kt_XX_sums.sum()  # e^T * \tilde{K}_XX * e
+    Kt_YY_sum = Kt_YY_sums.sum()  # e^T * \tilde{K}_YY * e
+    K_XY_sum = K_XY_sums_0.sum()  # e^T * K_{XY} * e
+
+    if biased:
+        mmd2 = ((Kt_XX_sum + sum_diag_X) / (m * m)
+            + (Kt_YY_sum + sum_diag_Y) / (m * m)
+            - 2.0 * K_XY_sum / (m * m))
+        mmd2_alt = (K_XX.sum() / (m * m) + K_YY.sum() / (m * m) -
+                    2.0 * K_XY.sum() / (m * m))
+        if t_mean is not None:
+            print 'Ran weighted MMD2'
+            pdb.set_trace()
+            mmd2 = Kw_XX.sum() + K_YY.sum() / (m * m) - 2.0 * Kw_XY.sum()
+    else:
+        mmd2 = (Kt_XX_sum / (m * (m - 1))
+            + Kt_YY_sum / (m * (m - 1))
+            - 2.0 * K_XY_sum / (m * m))
+
+    return mmd2
+
+
 ################################################################################
 # Helper functions to compute variances based on kernel matrices
 ################################################################################
 
 
-def _mmd2(K_XX, K_XY, K_YY, t_mean, t_cov_inv, const_diagonal=False,
-          biased=False):
+def _mmd2(K_XX, K_XY, K_YY, const_diagonal=False, biased=False):
     m = K_XX.size(0)    # assume X, Y are same shape
 
     # Get the various sums of kernels that we'll use

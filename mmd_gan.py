@@ -20,7 +20,7 @@ import util
 import numpy as np
 
 import base_module
-from mmd import mix_rbf_mmd2
+from mmd import mix_rbf_mmd2_weighted
 
 
 # NetG is a decoder
@@ -97,7 +97,7 @@ trn_dataset, trn_dataset_target = util.get_data(args, train_flag=True)
 trn_loader = torch.utils.data.DataLoader(trn_dataset,
     batch_size=args.batch_size, shuffle=True, num_workers=int(args.workers))
 trn_loader_target = torch.utils.data.DataLoader(trn_dataset_target,
-    batch_size=1000, shuffle=True, num_workers=int(args.workers))
+    batch_size=100, shuffle=True, num_workers=int(args.workers))
 
 # construct encoder/decoder modules
 hidden_dim = args.nz
@@ -178,14 +178,7 @@ for global_step in range(args.max_iter):
 
             f_enc_X_D, f_dec_X_D = netD(x)
 
-            # Get mean and cov_inv for target set.
-            target_batch_cpu, _ = iter(trn_loader_target).next()
-            target_batch_enc, _ = netD(Variable(target_batch_cpu.cuda()))
-            t_enc = target_batch_enc.cpu().data.numpy()
-            t_mean = np.mean(t_enc, axis=0)
-            t_cov_inv = np.linalg.inv(np.cov(t_enc, rowvar=False))
-            pdb.set_trace()
-
+            # Sample from generator and encode.
             noise = torch.cuda.FloatTensor(
                 batch_size, args.nz, 1, 1).normal_(0, 1)
             noise = Variable(noise, volatile=True)  # total freeze netG
@@ -193,8 +186,25 @@ for global_step in range(args.max_iter):
 
             f_enc_Y_D, f_dec_Y_D = netD(y)
 
+            # Get mean and cov_inv for target set.
+            target_batch_cpu, _ = iter(trn_loader_target).next()
+            print('Got {} target samples to encode for mean,cov_inv'.format(
+                  len(target_batch_cpu)))
+            target_batch_enc, _ = netD(Variable(target_batch_cpu.cuda()))
+            t_enc = target_batch_enc.cpu().data.numpy()
+            t_mean = np.reshape(np.mean(t_enc, axis=0), [-1, 1])
+            print t_enc
+            try:
+                t_cov_inv = np.linalg.inv(np.cov(t_enc, rowvar=False))
+            except Exception as e:
+                print e
+            pdb.set_trace()
+            t_mean = Variable(torch.from_numpy(t_mean)).cuda()
+            t_cov_inv = Variable(torch.from_numpy(t_cov_inv).type(
+                torch.FloatTensor)).cuda()
+
             # compute biased MMD2 and use ReLU to prevent negative value
-            mmd2_D = mix_rbf_mmd2(
+            mmd2_D = mix_rbf_mmd2_weighted(
                 f_enc_X_D, f_enc_Y_D, sigma_list, t_mean, t_cov_inv)
             mmd2_D = F.relu(mmd2_D)
 
@@ -236,9 +246,28 @@ for global_step in range(args.max_iter):
             y = netG(noise)
 
             f_enc_Y, f_dec_Y = netD(y)
+            pdb.set_trace()
+
+            # Get mean and cov_inv for target set.
+            target_batch_cpu, _ = iter(trn_loader_target).next()
+            print('Got {} target samples to encode for mean,cov_inv'.format(
+                  len(target_batch_cpu)))
+            target_batch_enc, _ = netD(Variable(target_batch_cpu.cuda()))
+            t_enc = target_batch_enc.cpu().data.numpy()
+            t_mean = np.reshape(np.mean(t_enc, axis=0), [-1, 1])
+            print t_enc
+            try:
+                t_cov_inv = np.linalg.inv(np.cov(t_enc, rowvar=False))
+            except Exception as e:
+                print e
+            pdb.set_trace()
+            t_mean = Variable(torch.from_numpy(t_mean)).cuda()
+            t_cov_inv = Variable(torch.from_numpy(t_cov_inv).type(
+                torch.FloatTensor)).cuda()
 
             # compute biased MMD2 and use ReLU to prevent negative value
-            mmd2_G = mix_rbf_mmd2(f_enc_X, f_enc_Y, sigma_list)
+            mmd2_G = mix_rbf_mmd2_weighted(
+                f_enc_X, f_enc_Y, sigma_list, t_mean, t_cov_inv)
             mmd2_G = F.relu(mmd2_G)
 
             # compute rank hinge loss
