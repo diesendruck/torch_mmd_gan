@@ -98,7 +98,7 @@ trn_dataset, trn_dataset_target = util.get_data(args, train_flag=True)
 trn_loader = torch.utils.data.DataLoader(trn_dataset,
     batch_size=args.batch_size, shuffle=True, num_workers=int(args.workers))
 trn_loader_target = torch.utils.data.DataLoader(trn_dataset_target,
-    batch_size=100, shuffle=True, num_workers=int(args.workers))
+    batch_size=2000, shuffle=True, num_workers=int(args.workers))
 
 # construct encoder/decoder modules
 hidden_dim = args.nz
@@ -134,7 +134,7 @@ fixed_noise = Variable(fixed_noise, requires_grad=False)
 
 # setup optimizer
 optimizerG = torch.optim.RMSprop(netG.parameters(), lr=args.lr)
-optimizerD = torch.optim.RMSprop(netD.parameters(), lr=args.lr/10.)
+optimizerD = torch.optim.RMSprop(netD.parameters(), lr=args.lr)
 
 lambda_MMD = 1.0
 lambda_AE_X = 8.0
@@ -164,10 +164,16 @@ for global_step in range(args.max_iter):
             Diters = 5
             Giters = 1
 
+        # Regulate when to start weighting.
+        if gen_iterations <= 1000:
+            weighted = 0
+        else:
+            weighted = 1
+
         # ---------------------------
         #        Optimize over NetD
         # ---------------------------
-        for _ in range(Diters):
+        for i in range(Diters):
             if batch_iter == len(trn_loader):
                 break
 
@@ -197,16 +203,18 @@ for global_step in range(args.max_iter):
             # Get mean and cov_inv for target set.
             target_batch_cpu, _ = iter(trn_loader_target).next()
             target_batch_enc, _ = netD(Variable(target_batch_cpu.cuda()))
-            t_enc = target_batch_enc.cpu().data.numpy()
-            t_mean = np.reshape(np.mean(t_enc, axis=0), [-1, 1])
+            t_enc_np = target_batch_enc.cpu().data.numpy()
+            t_mean_np = np.reshape(np.mean(t_enc_np, axis=0), [-1, 1])
             try:
-                t_cov = np.cov(t_enc, rowvar=False)
-                t_cov_inv = np.linalg.inv(t_cov)
-                t_norm_const = np.sqrt(np.linalg.det(2 * np.pi * t_cov))
+                t_cov_np = np.cov(t_enc_np, rowvar=False)
+                t_cov_inv_np = np.linalg.inv(t_cov_np)
             except Exception as e:
-                print e
-            t_mean = Variable(torch.from_numpy(t_mean)).cuda()
-            t_cov_inv = Variable(torch.from_numpy(t_cov_inv).type(
+                print('D Update: Error: {}'.format(e))
+                np.save('t_enc_on_error.npy', t_enc_np)
+                sys.exit('d_it {}'.format(i))
+
+            t_mean = Variable(torch.from_numpy(t_mean_np)).cuda()
+            t_cov_inv = Variable(torch.from_numpy(t_cov_inv_np).type(
                 torch.FloatTensor)).cuda()
 
             # compute biased MMD2 and use ReLU to prevent negative value
@@ -215,8 +223,7 @@ for global_step in range(args.max_iter):
                     f_enc_X_D, f_enc_Y_D, sigma_list)
             else:
                 mmd2_D = mix_rbf_mmd2_weighted(
-                    f_enc_X_D, f_enc_Y_D, sigma_list, t_mean, t_cov_inv,
-                    t_norm_const)
+                    f_enc_X_D, f_enc_Y_D, sigma_list, t_mean, t_cov_inv)
             mmd2_D = F.relu(mmd2_D)
 
             # compute rank hinge loss
@@ -239,7 +246,7 @@ for global_step in range(args.max_iter):
         for p in netD.parameters():
             p.requires_grad = False
 
-        for _ in range(Giters):
+        for j in range(Giters):
             if batch_iter == len(trn_loader):
                 break
 
@@ -267,7 +274,6 @@ for global_step in range(args.max_iter):
             try:
                 t_cov = np.cov(t_enc, rowvar=False)
                 t_cov_inv = np.linalg.inv(t_cov)
-                t_norm_const = np.sqrt(np.linalg.det(2 * np.pi * t_cov))
             except Exception as e:
                 print e
             t_mean = Variable(torch.from_numpy(t_mean)).cuda()
@@ -280,7 +286,7 @@ for global_step in range(args.max_iter):
                     f_enc_X, f_enc_Y, sigma_list)
             else:    
                 mmd2_G = mix_rbf_mmd2_weighted(
-                    f_enc_X, f_enc_Y, sigma_list, t_mean, t_cov_inv, t_norm_const)
+                    f_enc_X, f_enc_Y, sigma_list, t_mean, t_cov_inv)
             mmd2_G = F.relu(mmd2_G)
 
             # compute rank hinge loss
@@ -304,7 +310,7 @@ for global_step in range(args.max_iter):
                      f_enc_X_D.mean().data[0], f_enc_Y_D.mean().data[0],
                      base_module.grad_norm(netD), base_module.grad_norm(netG)))
 
-        if gen_iterations % 10 == 0:
+        if gen_iterations <= 25 and gen_iterations % 5 == 0:
             y_fixed = netG(fixed_noise)
             y_fixed.data = y_fixed.data.mul(0.5).add(0.5)
             f_dec_X_D = f_dec_X_D.view(f_dec_X_D.size(0), args.nc,
@@ -316,6 +322,19 @@ for global_step in range(args.max_iter):
             vutils.save_image(
                 f_dec_X_D.data, '{0}/decode_samples_{1}.png'.format(
                     args.experiment, gen_iterations))
+        elif gen_iterations % 100 == 0:
+            y_fixed = netG(fixed_noise)
+            y_fixed.data = y_fixed.data.mul(0.5).add(0.5)
+            f_dec_X_D = f_dec_X_D.view(f_dec_X_D.size(0), args.nc,
+                                       args.image_size, args.image_size)
+            f_dec_X_D.data = f_dec_X_D.data.mul(0.5).add(0.5)
+            vutils.save_image(
+                y_fixed.data, '{0}/fake_samples_{1}.png'.format(
+                    args.experiment, gen_iterations))
+            vutils.save_image(
+                f_dec_X_D.data, '{0}/decode_samples_{1}.png'.format(
+                    args.experiment, gen_iterations))
+
 
     if global_step % 50 == 0:
         torch.save(netG.state_dict(), '{0}/netG_iter_{1}.pth'.format(

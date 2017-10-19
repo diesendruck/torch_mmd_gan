@@ -10,7 +10,7 @@ if [ $1 == 'mnist' ]; then
     DATAROOT=${DATA_PATH}/mnist
     ISIZE=32
     NC=1
-    NZ=10
+    NZ=16
 elif [ $1 == 'cifar10' ]; then
     DATASET=cifar10
     DATAROOT=${DATA_PATH}/cifar10

@@ -103,11 +103,12 @@ def get_data(args, train_flag=True):
                              train=train_flag,
                              transform=transform)
         # Fetch only zeros and twos.
-        dataset_zerotwo = ([v for i,v in enumerate(dataset) if
-                            (dataset.train_labels[i] == 0 or
-                             dataset.train_labels[i] == 2)])
-        dataset_two = ([v for i,v in enumerate(dataset) if
-                        dataset.train_labels[i] == 2])
+        dataset_zero = (
+            [v for i,v in enumerate(dataset) if dataset.train_labels[i] == 0])
+        dataset_two = (
+            [v for i,v in enumerate(dataset) if dataset.train_labels[i] == 2])
+        dataset_zerotwo = dataset_zero + dataset_two[:len(dataset_two)/2]
+        print('Made a dataset thats 2:1 zeros to twos.')
         return dataset_zerotwo, dataset_two
 
     elif args.dataset == 'celeba':

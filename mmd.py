@@ -74,7 +74,7 @@ def mix_rbf_mmd2_and_ratio(X, Y, sigma_list, biased=True):
 
 # Weighted version of mix RBF squared MMD.
 def mix_rbf_mmd2_weighted(X, Y, sigma_list, t_mean=None, t_cov_inv=None,
-        t_norm_const=None, biased=True, const_diagonal=False):
+        biased=True, const_diagonal=False):
     assert(X.size(0) == Y.size(0))
     m = X.size(0)
 
@@ -98,13 +98,15 @@ def mix_rbf_mmd2_weighted(X, Y, sigma_list, t_mean=None, t_cov_inv=None,
         k = t_mean.size(0)
         xt_ = X - t_mean.t().expand_as(X)
         x_ = xt_.t()
-        t_norm_const = 1.
-        thinning_kernel = (
-            torch.exp(-0.5 * torch.mm(torch.mm(xt_, t_cov_inv), x_)) /
-            t_norm_const)
-        pr = 1. - 0.5 * thinning_kernel
-        keeping_probs = torch.diag(pr).unsqueeze(1)
-        keeping_probs_horiz = keeping_probs.expand_as(pr)
+        # Only interested in diagonal, from here until keeping_probs.
+        thinning_kernel_part = (
+            torch.exp(-1.5 * torch.mm(torch.mm(xt_, t_cov_inv), x_)))
+        tkp = thinning_kernel_part
+        tkp_diag = torch.diag(tkp).unsqueeze(1)
+        tkp_diag_max = torch.max(tkp_diag).unsqueeze(1).expand_as(tkp_diag)
+        thinning_kernel = tkp_diag / (tkp_diag_max + 1e-5)
+        keeping_probs = 1. - thinning_kernel
+        keeping_probs_horiz = keeping_probs.expand_as(tkp)
         keeping_probs_vert = keeping_probs_horiz.t()
         p1_weights = 1. / keeping_probs_horiz
         p2_weights = 1. / keeping_probs_vert
