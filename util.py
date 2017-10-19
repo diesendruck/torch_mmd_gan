@@ -107,9 +107,9 @@ def get_data(args, train_flag=True):
             [v for i,v in enumerate(dataset) if dataset.train_labels[i] == 0])
         dataset_two = (
             [v for i,v in enumerate(dataset) if dataset.train_labels[i] == 2])
-        dataset_zerotwo = dataset_zero + dataset_two[:len(dataset_two)/2]
+        dataset_zerotwo = dataset_zero + dataset_two[:len(dataset_two)/4]
         print('Made a dataset thats 2:1 zeros to twos.')
-        return dataset_zerotwo, dataset_two
+        return dataset_zerotwo, dataset_zero, dataset_two
 
     elif args.dataset == 'celeba':
         imdir = 'train' if train_flag else 'val'

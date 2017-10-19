@@ -12,14 +12,13 @@ import torch.utils.data
 import torchvision.utils as vutils
 from torch.autograd import Variable
 import torch.nn.functional as F
+import numpy as np
 import os
 import pdb
 import sys
 import timeit
 
 import util
-import numpy as np
-
 import base_module
 from mmd import mix_rbf_mmd2, mix_rbf_mmd2_weighted
 
@@ -94,9 +93,12 @@ torch.cuda.manual_seed(args.manual_seed)
 cudnn.benchmark = True
 
 # Get data
-trn_dataset, trn_dataset_target = util.get_data(args, train_flag=True)
+trn_dataset, trn_dataset_main, trn_dataset_target = (
+    util.get_data(args, train_flag=True))
 trn_loader = torch.utils.data.DataLoader(trn_dataset,
     batch_size=args.batch_size, shuffle=True, num_workers=int(args.workers))
+trn_loader_main = torch.utils.data.DataLoader(trn_dataset_main,
+    batch_size=2000, shuffle=True, num_workers=int(args.workers))
 trn_loader_target = torch.utils.data.DataLoader(trn_dataset_target,
     batch_size=2000, shuffle=True, num_workers=int(args.workers))
 
@@ -113,9 +115,27 @@ print("netG:", netG)
 print("netD:", netD)
 print("oneSide:", one_sided)
 
-netG.apply(base_module.weights_init)
-netD.apply(base_module.weights_init)
-one_sided.apply(base_module.weights_init)
+# Load existing model, e.g. pretrained model.
+load_existing = 0
+if load_existing:
+    try:
+        ref = 1000
+        netG.load_state_dict(torch.load(os.path.join(
+            args.experiment, 'refs', 'netG_iter_{}.pth'.format(ref))))
+        netD.load_state_dict(torch.load(os.path.join(
+            args.experiment, 'refs', 'netD_iter_{}.pth'.format(ref))))
+        gen_iterations = ref 
+        num_pretraining_iters = 1000 
+        print('Loaded state_dict for iter {}'.format(ref))
+    except Exception as e:
+        print('Error on model load: {}'.format(e))
+# Or set up model from base.
+else:
+    netG.apply(base_module.weights_init)
+    netD.apply(base_module.weights_init)
+    one_sided.apply(base_module.weights_init)
+    gen_iterations = 0
+    num_pretraining_iters = -1 
 
 # sigma for MMD
 base = 1.0
@@ -149,7 +169,6 @@ else:
     print 'Not weighted'
 
 time = timeit.default_timer()
-gen_iterations = 0
 for global_step in range(args.max_iter):
     data_iter = iter(trn_loader)
     batch_iter = 0
@@ -157,6 +176,7 @@ for global_step in range(args.max_iter):
         for p in netD.parameters():
             p.requires_grad = True
 
+        # Schedule of alternation between D and G updates.
         if gen_iterations < 25 or gen_iterations % 500 == 0:
             Diters = 100
             Giters = 1
@@ -165,7 +185,7 @@ for global_step in range(args.max_iter):
             Giters = 1
 
         # Regulate when to start weighting.
-        if gen_iterations <= 1000:
+        if gen_iterations <= num_pretraining_iters:
             weighted = 0
         else:
             weighted = 1
@@ -200,11 +220,18 @@ for global_step in range(args.max_iter):
 
             f_enc_Y_D, f_dec_Y_D = netD(y)
 
-            # Get mean and cov_inv for target set.
+            # Get mean and cov_inv for main (m) and target (t) set.
+            main_batch_cpu, _ = iter(trn_loader_main).next()
+            main_batch_enc, _ = netD(Variable(main_batch_cpu.cuda()))
+            m_enc_np = main_batch_enc.cpu().data.numpy()
             target_batch_cpu, _ = iter(trn_loader_target).next()
             target_batch_enc, _ = netD(Variable(target_batch_cpu.cuda()))
             t_enc_np = target_batch_enc.cpu().data.numpy()
-            t_mean_np = np.reshape(np.mean(t_enc_np, axis=0), [-1, 1])
+            if gen_iterations % 100 == 0:
+                np.save('m_enc_{}.npy'.format(gen_iterations), m_enc_np)
+                np.save('t_enc_{}.npy'.format(gen_iterations), t_enc_np)
+                np.save('x_enc_{}.npy'.format(gen_iterations),
+                        f_enc_X_D.cpu().data.numpy())
             try:
                 t_cov_np = np.cov(t_enc_np, rowvar=False)
                 t_cov_inv_np = np.linalg.inv(t_cov_np)
@@ -213,6 +240,7 @@ for global_step in range(args.max_iter):
                 np.save('t_enc_on_error.npy', t_enc_np)
                 sys.exit('d_it {}'.format(i))
 
+            t_mean_np = np.reshape(np.mean(t_enc_np, axis=0), [-1, 1])
             t_mean = Variable(torch.from_numpy(t_mean_np)).cuda()
             t_cov_inv = Variable(torch.from_numpy(t_cov_inv_np).type(
                 torch.FloatTensor)).cuda()
@@ -222,8 +250,14 @@ for global_step in range(args.max_iter):
                 mmd2_D = mix_rbf_mmd2(
                     f_enc_X_D, f_enc_Y_D, sigma_list)
             else:
-                mmd2_D = mix_rbf_mmd2_weighted(
-                    f_enc_X_D, f_enc_Y_D, sigma_list, t_mean, t_cov_inv)
+                try:
+                    mmd2_D = mix_rbf_mmd2_weighted(
+                        f_enc_X_D, f_enc_Y_D, sigma_list, t_mean, t_cov_inv)
+                except Exception as e:
+                    print('D Update / Weighted MMD: Error: {}'.format(e))
+                    np.save('t_enc_on_error_in_weighted_mmd.npy', t_enc_np)
+                    np.save('X_on_error_in_weighted_mmd.npy',
+                        f_enc_X_D.cpu().data.numpy())
             mmd2_D = F.relu(mmd2_D)
 
             # compute rank hinge loss
@@ -269,15 +303,15 @@ for global_step in range(args.max_iter):
             # Get mean and cov_inv for target set.
             target_batch_cpu, _ = iter(trn_loader_target).next()
             target_batch_enc, _ = netD(Variable(target_batch_cpu.cuda()))
-            t_enc = target_batch_enc.cpu().data.numpy()
-            t_mean = np.reshape(np.mean(t_enc, axis=0), [-1, 1])
+            t_enc_np = target_batch_enc.cpu().data.numpy()
+            t_mean_np = np.reshape(np.mean(t_enc_np, axis=0), [-1, 1])
             try:
-                t_cov = np.cov(t_enc, rowvar=False)
-                t_cov_inv = np.linalg.inv(t_cov)
+                t_cov_np = np.cov(t_enc_np, rowvar=False)
+                t_cov_inv = np.linalg.inv(t_cov_np)
             except Exception as e:
                 print e
-            t_mean = Variable(torch.from_numpy(t_mean)).cuda()
-            t_cov_inv = Variable(torch.from_numpy(t_cov_inv).type(
+            t_mean = Variable(torch.from_numpy(t_mean_np)).cuda()
+            t_cov_inv = Variable(torch.from_numpy(t_cov_inv_np).type(
                 torch.FloatTensor)).cuda()
 
             # compute biased MMD2 and use ReLU to prevent negative value
@@ -285,8 +319,14 @@ for global_step in range(args.max_iter):
                 mmd2_G = mix_rbf_mmd2(
                     f_enc_X, f_enc_Y, sigma_list)
             else:    
-                mmd2_G = mix_rbf_mmd2_weighted(
-                    f_enc_X, f_enc_Y, sigma_list, t_mean, t_cov_inv)
+                try:
+                    mmd2_G = mix_rbf_mmd2_weighted(
+                        f_enc_X, f_enc_Y, sigma_list, t_mean, t_cov_inv)
+                except Exception as e:
+                    print('G Update / Weighted MMD: Error: {}'.format(e))
+                    np.save('t_enc_on_error_in_weighted_mmd.npy', t_enc_np)
+                    np.save('X_on_error_in_weighted_mmd.npy',
+                        f_enc_X.cpu().data.numpy())
             mmd2_G = F.relu(mmd2_G)
 
             # compute rank hinge loss
@@ -300,9 +340,9 @@ for global_step in range(args.max_iter):
 
         run_time = (timeit.default_timer() - time) / 60.0
         if batch_iter % len(trn_loader) == 0:
-            print(('[%3d/%3d][%3d/%3d] [%5d] (%.2f m) MMD2_D %.6f hinge %.6f '
-                   'L2_AE_X %.6f L2_AE_Y %.6f loss_D %.6f Loss_G %.6f f_X '
-                   '%.6f f_Y %.6f |gD| %.4f |gG| %.4f')
+            print(('[Epoch %3d/%3d][Batch %3d/%3d] [%5d] (%.2f m) MMD2_D %.6f '
+                   'hinge %.6f L2_AE_X %.6f L2_AE_Y %.6f loss_D %.6f Loss_G '
+                   '%.6f f_X %.6f f_Y %.6f |gD| %.4f |gG| %.4f')
                   % (global_step, args.max_iter, batch_iter, len(trn_loader),
                      gen_iterations, run_time, mmd2_D.data[0],
                      one_side_errD.data[0], L2_AE_X_D.data[0],
@@ -310,34 +350,31 @@ for global_step in range(args.max_iter):
                      f_enc_X_D.mean().data[0], f_enc_Y_D.mean().data[0],
                      base_module.grad_norm(netD), base_module.grad_norm(netG)))
 
-        if gen_iterations <= 25 and gen_iterations % 5 == 0:
+        if ((gen_iterations <= 25 and gen_iterations % 5 == 0) or
+            (gen_iterations % 100 == 0)):
             y_fixed = netG(fixed_noise)
             y_fixed.data = y_fixed.data.mul(0.5).add(0.5)
             f_dec_X_D = f_dec_X_D.view(f_dec_X_D.size(0), args.nc,
                                        args.image_size, args.image_size)
             f_dec_X_D.data = f_dec_X_D.data.mul(0.5).add(0.5)
-            vutils.save_image(
-                y_fixed.data, '{0}/fake_samples_{1}.png'.format(
-                    args.experiment, gen_iterations))
-            vutils.save_image(
-                f_dec_X_D.data, '{0}/decode_samples_{1}.png'.format(
-                    args.experiment, gen_iterations))
-        elif gen_iterations % 100 == 0:
-            y_fixed = netG(fixed_noise)
-            y_fixed.data = y_fixed.data.mul(0.5).add(0.5)
-            f_dec_X_D = f_dec_X_D.view(f_dec_X_D.size(0), args.nc,
+            f_dec_Y_D = f_dec_Y_D.view(f_dec_Y_D.size(0), args.nc,
                                        args.image_size, args.image_size)
-            f_dec_X_D.data = f_dec_X_D.data.mul(0.5).add(0.5)
+            f_dec_Y_D.data = f_dec_Y_D.data.mul(0.5).add(0.5)
             vutils.save_image(
-                y_fixed.data, '{0}/fake_samples_{1}.png'.format(
+                x.data, '{0}/real_{1}.png'.format(
                     args.experiment, gen_iterations))
             vutils.save_image(
-                f_dec_X_D.data, '{0}/decode_samples_{1}.png'.format(
+                y_fixed.data, '{0}/gen_{1}.png'.format(
+                    args.experiment, gen_iterations))
+            vutils.save_image(
+                f_dec_X_D.data, '{0}/ae_real_{1}.png'.format(
+                    args.experiment, gen_iterations))
+            vutils.save_image(
+                f_dec_Y_D.data, '{0}/ae_gen_{1}.png'.format(
                     args.experiment, gen_iterations))
 
-
-    if global_step % 50 == 0:
-        torch.save(netG.state_dict(), '{0}/netG_iter_{1}.pth'.format(
-            args.experiment, global_step))
-        torch.save(netD.state_dict(), '{0}/netD_iter_{1}.pth'.format(
-            args.experiment, global_step))
+        if gen_iterations % 100 == 0:
+            torch.save(netG.state_dict(), '{0}/netG_iter_{1}.pth'.format(
+                args.experiment, gen_iterations))
+            torch.save(netD.state_dict(), '{0}/netD_iter_{1}.pth'.format(
+                args.experiment, gen_iterations))

@@ -99,12 +99,20 @@ def mix_rbf_mmd2_weighted(X, Y, sigma_list, t_mean=None, t_cov_inv=None,
         xt_ = X - t_mean.t().expand_as(X)
         x_ = xt_.t()
         # Only interested in diagonal, from here until keeping_probs.
-        thinning_kernel_part = (
-            torch.exp(-1.5 * torch.mm(torch.mm(xt_, t_cov_inv), x_)))
-        tkp = thinning_kernel_part
-        tkp_diag = torch.diag(tkp).unsqueeze(1)
-        tkp_diag_max = torch.max(tkp_diag).unsqueeze(1).expand_as(tkp_diag)
-        thinning_kernel = tkp_diag / (tkp_diag_max + 1e-5)
+        try:
+            const = 0.05
+            thinning_kernel_part = (
+                torch.exp(-1. * const * torch.mm(torch.mm(xt_, t_cov_inv), x_)))
+            tkp = thinning_kernel_part
+            tkp_diag = torch.diag(tkp).unsqueeze(1)
+            tkp_diag_max = torch.max(tkp_diag).unsqueeze(1).expand_as(tkp_diag)
+        except Exception as e:
+            pdb.set_trace()
+            print 'Inside weighted MMD / Error w/ thinning kernel: {}'.format(e)
+            np.save('tkp_on_weighted_MMD_error.npy', tkp.cpu().data.numpy())
+        thinning_scale = 0.5
+        assert thinning_scale < 1 and thinning_scale > 0
+        thinning_kernel = thinning_scale * (tkp_diag / tkp_diag_max)
         keeping_probs = 1. - thinning_kernel
         keeping_probs_horiz = keeping_probs.expand_as(tkp)
         keeping_probs_vert = keeping_probs_horiz.t()
