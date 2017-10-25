@@ -172,7 +172,7 @@ def _mmd2_and_variance(K_XX, K_XY, K_YY, const_diagonal=False, biased=False):
 # Weighted version of mix RBF squared MMD.
 def mix_rbf_mmd2_weighted(X, Y, sigma_list, exp_const, thinning_scale,
         t_mean=None, t_cov_inv=None, biased=True, const_diagonal=False,
-        x_enc_prob1=None):
+        x_enc_p1=None):
     assert(X.size(0) == Y.size(0))
     m = X.size(0)
 
@@ -213,8 +213,8 @@ def mix_rbf_mmd2_weighted(X, Y, sigma_list, exp_const, thinning_scale,
         keeping_probs = 1. - thinning_kernel
         keeping_probs_horiz = keeping_probs.expand_as(tkp)
         keeping_probs_vert = keeping_probs_horiz.t()
-    elif x_enc_prob1 is not None:
-        xp1 = x_enc_prob1.unsqueeze(1)
+    elif x_enc_p1 is not None:
+        xp1 = x_enc_p1.unsqueeze(1)
         xp1_scaled = thinning_scale * xp1 
         keeping_probs = 1. - xp1_scaled
         keeping_probs_horiz = keeping_probs.expand_as(K_XX)
@@ -231,7 +231,7 @@ def mix_rbf_mmd2_weighted(X, Y, sigma_list, exp_const, thinning_scale,
     Kw_XY = K[:m, m:] * p1_weights_normed
 
     if biased:
-        if (t_mean is not None) or (x_enc_prob1 is not None):
+        if (t_mean is not None) or (x_enc_p1 is not None):
             mmd2_w = Kw_XX.sum() + K_YY.sum() / (m * m) - 2.0 * Kw_XY.sum()
             # PARTIAL MMD: mmd2_w = K_YY.sum() / (m * m) - 2.0 * Kw_XY.sum()
             mmd2 = mmd2_w

@@ -102,6 +102,10 @@ trn_dataset, trn_dataset_main, trn_dataset_target = (
     util.get_data(args, train_flag=True))
 trn_loader = torch.utils.data.DataLoader(trn_dataset,
     batch_size=args.batch_size, shuffle=True, num_workers=int(args.workers))
+trn_loader_eval = torch.utils.data.DataLoader(trn_dataset,
+    batch_size=args.batch_size, shuffle=True, num_workers=int(args.workers))
+trn_loader_initial = torch.utils.data.DataLoader(trn_dataset,
+    batch_size=1000, shuffle=True, num_workers=int(args.workers))
 loader_num = 200
 trn_loader_main = torch.utils.data.DataLoader(trn_dataset_main,
     batch_size=loader_num, shuffle=True, num_workers=int(args.workers))
@@ -144,7 +148,7 @@ if args.load_existing:
 # Or set up model from base.
 else:
     gen_iterations = 0
-    num_pretraining_iters = -1 
+    num_pretraining_iters = args.num_pretrain
     netG.apply(base_module.weights_init)
     netD.apply(base_module.weights_init)
     one_sided.apply(base_module.weights_init)
@@ -170,11 +174,10 @@ fixed_noise = Variable(fixed_noise, requires_grad=False)
 optimizerD = torch.optim.RMSprop(netD.parameters(), lr=args.dlr)
 optimizerG = torch.optim.RMSprop(netG.parameters(), lr=args.glr)
 
-lambda_MMD = 1000.0
+lambda_MMD = 1.0
 lambda_AE_X = 8.0
 lambda_AE_Y = 8.0
 lambda_rg = 16.0
-#lambda_rg = 0.0
 
 # TOGGLE WEIGHTING
 weighted = 1
@@ -185,31 +188,37 @@ else:
 
 
 def do_log(it):
-    if ((it <= 100 and it % 10 == 0) or (it % 200 == 0)):
-        return True
-    else:
-        return False
+    #if ((it <= 100 and it % 10 == 0) or (it % 200 == 0)):
+    #    return True
+    #else:
+    #    return False
+    return it % 10 == 0
 
+if args.thin_type == 'logistic':
+    data_initial = iter(trn_loader_initial).next()
+    x_init_cpu, x_init_labels_cpu = data_initial
+    x_init = Variable(x_init_cpu.cuda())
+    x_init_labels_np = x_init_labels_cpu.numpy()
 
 time = timeit.default_timer()
 print(args)
 for global_step in range(args.max_iter):
     data_iter = iter(trn_loader)
+    data_iter_eval = iter(trn_loader_eval)
     batch_iter = 0
     while (batch_iter < len(trn_loader)):
         for p in netD.parameters():
             p.requires_grad = True
 
         # Schedule of alternation between D and G updates.
-        if gen_iterations < 25 or gen_iterations % args.d_calibration_step == 0:
-            Diters = 100
-            Giters = 1
-        else:
-            Diters = args.Diters
-            Giters = 1
-        #if gen_iterations == 400:
-        #    args.glr = 5e-5
-        #    optimizerG = torch.optim.RMSprop(netG.parameters(), lr=args.glr)
+        #if gen_iterations < 25 or gen_iterations % args.d_calibration_step == 0:
+        #    Diters = 100
+        #    Giters = 1
+        #else:
+        #    Diters = args.Diters
+        #    Giters = 1
+        Diters = args.Diters
+        Giters = 1
 
         # Regulate when to start weighting.
         if gen_iterations < num_pretraining_iters:
@@ -218,7 +227,7 @@ for global_step in range(args.max_iter):
             weighted = 1
 
         # ---------------------------
-        #        Optimize over NetD
+        #        BEGIN: Optimize over NetD
         # ---------------------------
         for i in range(Diters):
             if batch_iter == len(trn_loader):
@@ -233,7 +242,7 @@ for global_step in range(args.max_iter):
             batch_iter += 1
             netD.zero_grad()
 
-            x_cpu, _ = data
+            x_cpu, xlab_cpu = data
             x = Variable(x_cpu.cuda())
             batch_size = x.size(0)
 
@@ -278,14 +287,58 @@ for global_step in range(args.max_iter):
                     sys.exit('d_it {}'.format(i))
             elif args.thin_type == 'logistic':
                 # Pre-compute logistic function for target/non-target points.
-                features = np.vstack((m_enc_np, t_enc_np))
-                labels = np.hstack((np.zeros(loader_num), np.ones(loader_num)))
+                #features = np.vstack((m_enc_np, t_enc_np))
+                #labels = np.hstack((np.zeros(loader_num), np.ones(loader_num)))
+
+                # Learn logistic regr using current encoder on initial data.
+                x_init_enc, _ = netD(x_init)
+                x_init_enc_np = x_init_enc.cpu().data.numpy()
                 clf = LogisticRegression(C=1e15)
-                clf.fit(features, labels)
-                x_enc_probs_np = clf.predict_proba(f_enc_X_D.cpu().data.numpy())
-                x_enc_prob1_np = np.array(
+                clf.fit(x_init_enc_np, x_init_labels_np)
+                x_init_enc_probs_np = clf.predict_proba(x_init_enc_np)
+                x_init_enc_p1_np = np.array(
+                    [probs[1] for probs in x_init_enc_probs_np])
+                # Eval logistic regr using current encoder on new data.
+                data_eval = data_iter_eval.next()
+                x_eval_cpu, x_eval_labels_cpu = data_eval
+                x_eval_labels_np = x_eval_labels_cpu.numpy()
+                x_eval = Variable(x_eval_cpu.cuda())
+                batch_size = x_eval.size(0)
+                x_eval_enc, _ = netD(x_eval)
+                x_eval_enc_np = x_eval_enc.cpu().data.numpy()
+                x_eval_enc_probs_np = clf.predict_proba(x_eval_enc_np)  # clf trained on x_init
+                x_eval_enc_p1_np = np.array(
+                    [probs[1] for probs in x_eval_enc_probs_np])
+                # Eval logistic regr using current encoder on new simulations.
+                noise_eval = torch.cuda.FloatTensor(
+                    batch_size, args.nz, 1, 1).normal_(0, 1)
+                noise_eval = Variable(noise_eval, volatile=True)  # total freeze netG
+                y_eval = Variable(netG(noise_eval).data)
+                y_eval_enc, _ = netD(y_eval)
+                y_eval_enc_np = y_eval_enc.cpu().data.numpy()
+                y_eval_enc_probs_np = clf.predict_proba(y_eval_enc_np)  # clf trained on x_init
+                y_eval_enc_p1_np = np.array(
+                    [probs[1] for probs in y_eval_enc_probs_np])
+                # Get logistic regr error on x_eval, and class distr on y_eval.
+                x_eval_error = np.mean(abs(x_eval_enc_p1_np - x_eval_labels_np))
+                y_eval_labels = clf.predict(y_eval_enc_np)
+                '''
+                if do_log(gen_iterations):
+                    with open(os.path.join(save_dir,
+                            'log_x_eval_regression_error.txt'), 'a') as f:
+                        f.write('{:.6f}\n'.format(x_eval_error))
+                    with open(os.path.join(save_dir,
+                            'log_y_eval_proportion1.txt'), 'a') as f:
+                        f.write('{:.6f}\n'.format(
+                            np.sum(y_eval_labels)/float(len(y_eval_labels))))
+
+                '''
+                # Get probs for x encoding above, using current logistic reg.
+                x_enc_np = f_enc_X_D.cpu().data.numpy()
+                x_enc_probs_np = clf.predict_proba(x_enc_np)
+                x_enc_p1_np = np.array(
                     [probs[1] for probs in x_enc_probs_np])
-                x_enc_prob1 = Variable(torch.from_numpy(x_enc_prob1_np).type(
+                x_enc_p1 = Variable(torch.from_numpy(x_enc_p1_np).type(
                     torch.FloatTensor)).cuda()
 
             # compute biased MMD2 and use ReLU to prevent negative value
@@ -301,7 +354,7 @@ for global_step in range(args.max_iter):
                     elif args.thin_type == 'logistic':
                         mmd2_D = mix_rbf_mmd2_weighted(
                             f_enc_X_D, f_enc_Y_D, sigma_list, args.exp_const,
-                            args.thinning_scale, x_enc_prob1=x_enc_prob1)
+                            args.thinning_scale, x_enc_p1=x_enc_p1)
 
                 except Exception as e:
                     print('D Update / Weighted MMD: Error: {}'.format(e))
@@ -309,11 +362,10 @@ for global_step in range(args.max_iter):
                         save_dir), t_enc_np)
                     np.save('{}/X_on_error_in_weighted_mmd.npy'.format(
                         save_dir), f_enc_X_D.cpu().data.numpy())
+
             mmd2_D = F.relu(mmd2_D)
 
             # compute rank hinge loss
-            #print('f_enc_X_D:', f_enc_X_D.size())
-            #print('f_enc_Y_D:', f_enc_Y_D.size())
             one_side_errD = one_sided(f_enc_X_D.mean(0) - f_enc_Y_D.mean(0))
 
             # compute L2-loss of AE
@@ -324,9 +376,12 @@ for global_step in range(args.max_iter):
                 lambda_AE_X * L2_AE_X_D - lambda_AE_Y * L2_AE_Y_D)
             errD.backward(mone)
             optimizerD.step()
+        # ---------------------------
+        #        END: Optimize over NetD
+        # ---------------------------
 
         # ---------------------------
-        #        Optimize over NetG
+        #        BEGIN: Optimize over NetG
         # ---------------------------
         for p in netD.parameters():
             p.requires_grad = False
@@ -341,11 +396,11 @@ for global_step in range(args.max_iter):
 
             x_cpu, _ = data
             x = Variable(x_cpu.cuda())
-            batch_size = x.size(0)
+            batch_size_x = x.size(0)
 
             f_enc_X, f_dec_X = netD(x)
 
-            noise = torch.cuda.FloatTensor(batch_size, args.nz, 1, 1).normal_(0, 1)
+            noise = torch.cuda.FloatTensor(batch_size_x, args.nz, 1, 1).normal_(0, 1)
             noise = Variable(noise)
             y = netG(noise)
 
@@ -374,15 +429,53 @@ for global_step in range(args.max_iter):
                         save_dir), t_enc_np)
                     sys.exit('d_it {}'.format(i))
             elif args.thin_type == 'logistic':
-                # Pre-compute logistic function for target/non-target points.
-                features = np.vstack((m_enc_np, t_enc_np))
-                labels = np.hstack((np.zeros(loader_num), np.ones(loader_num)))
+                # Learn logistic regr using current encoder on initial data.
+                x_init_enc, _ = netD(x_init)
+                x_init_enc_np = x_init_enc.cpu().data.numpy()
                 clf = LogisticRegression(C=1e15)
-                clf.fit(features, labels)
-                x_enc_probs_np = clf.predict_proba(f_enc_X.cpu().data.numpy())
-                x_enc_prob1_np = np.array(
+                clf.fit(x_init_enc_np, x_init_labels_np)
+                x_init_enc_probs_np = clf.predict_proba(x_init_enc_np)
+                x_init_enc_p1_np = np.array(
+                    [probs[1] for probs in x_init_enc_probs_np])
+                # Eval logistic regr using current encoder on new data.
+                data_eval = data_iter_eval.next()
+                x_eval_cpu, x_eval_labels_cpu = data_eval
+                x_eval_labels_np = x_eval_labels_cpu.numpy()
+                x_eval = Variable(x_eval_cpu.cuda())
+                batch_size_x_eval = x_eval.size(0)
+                x_eval_enc, _ = netD(x_eval)
+                x_eval_enc_np = x_eval_enc.cpu().data.numpy()
+                x_eval_enc_probs_np = clf.predict_proba(x_eval_enc_np)  # clf trained on x_init
+                x_eval_enc_p1_np = np.array(
+                    [probs[1] for probs in x_eval_enc_probs_np])
+                # Eval logistic regr using current encoder on new simulations.
+                noise_eval = torch.cuda.FloatTensor(
+                    batch_size_x, args.nz, 1, 1).normal_(0, 1)
+                noise_eval = Variable(noise_eval, volatile=True)  # total freeze netG
+                y_noise_eval = netG(noise_eval)
+                y_eval = Variable(y_noise_eval.data)
+                y_eval_enc, _ = netD(y_eval)
+                y_eval_enc_np = y_eval_enc.cpu().data.numpy()
+                y_eval_enc_probs_np = clf.predict_proba(y_eval_enc_np)  # clf trained on x_init
+                y_eval_enc_p1_np = np.array(
+                    [probs[1] for probs in y_eval_enc_probs_np])
+                # Get logistic regr error on x_eval, and class distr on y_eval.
+                x_eval_error = np.mean(abs(x_eval_enc_p1_np - x_eval_labels_np))
+                y_eval_labels = clf.predict(y_eval_enc_np)
+                if do_log(gen_iterations):
+                    with open(os.path.join(save_dir,
+                            'log_x_eval_regression_error.txt'), 'a') as f:
+                        f.write('{:.6f}\n'.format(x_eval_error))
+                    with open(os.path.join(save_dir,
+                            'log_y_eval_proportion1.txt'), 'a') as f:
+                        f.write('{:.6f}\n'.format(
+                            np.sum(y_eval_labels)/float(len(y_eval_labels))))
+                # Get probs for x encoding above, using current logistic reg.
+                x_enc_np = f_enc_X.cpu().data.numpy()
+                x_enc_probs_np = clf.predict_proba(x_enc_np)
+                x_enc_p1_np = np.array(
                     [probs[1] for probs in x_enc_probs_np])
-                x_enc_prob1 = Variable(torch.from_numpy(x_enc_prob1_np).type(
+                x_enc_p1 = Variable(torch.from_numpy(x_enc_p1_np).type(
                     torch.FloatTensor)).cuda()
 
             # compute biased MMD2 and use ReLU to prevent negative value
@@ -398,7 +491,7 @@ for global_step in range(args.max_iter):
                     elif args.thin_type == 'logistic':
                         mmd2_G = mix_rbf_mmd2_weighted(
                             f_enc_X, f_enc_Y, sigma_list, args.exp_const,
-                            args.thinning_scale, x_enc_prob1=x_enc_prob1)
+                            args.thinning_scale, x_enc_p1=x_enc_p1)
                 except Exception as e:
                     pdb.set_trace()
                     print('G Update / Weighted MMD: Error: {}'.format(e))
@@ -414,9 +507,15 @@ for global_step in range(args.max_iter):
             errG = lambda_MMD * torch.sqrt(mmd2_G) + lambda_rg * one_side_errG
             errG.backward(one)
             optimizerG.step()
+            gen_iterations += 1
+        # ---------------------------
+        #        END: Optimize over NetG
+        # ---------------------------
 
+        # Do various logs and print summaries.
         run_time = (timeit.default_timer() - time) / 60.0
-        if batch_iter % len(trn_loader) == 0:
+        if do_log(gen_iterations):
+            # Print summary.
             print(('[Epoch %3d/%3d][Batch %3d/%3d] [%5d] (%.2f m) MMD2_D %.6f '
                    'hinge %.6f L2_AE_X %.6f L2_AE_Y %.6f loss_D %.6f Loss_G '
                    '%.6f f_X %.6f f_Y %.6f |gD| %.4f |gG| %.4f')
@@ -426,10 +525,11 @@ for global_step in range(args.max_iter):
                      L2_AE_Y_D.data[0], errD.data[0], errG.data[0],
                      f_enc_X_D.mean().data[0], f_enc_Y_D.mean().data[0],
                      base_module.grad_norm(netD), base_module.grad_norm(netG)))
-
-        if do_log(gen_iterations):
+            # Save images.
             y_fixed = netG(fixed_noise)
             y_fixed.data = y_fixed.data.mul(0.5).add(0.5)
+            y_eval = y_noise_eval 
+            y_eval.data = y_eval.data.mul(0.5).add(0.5)
             f_dec_X_D = f_dec_X_D.view(f_dec_X_D.size(0), args.nc,
                                        args.image_size, args.image_size)
             f_dec_X_D.data = f_dec_X_D.data.mul(0.5).add(0.5)
@@ -443,16 +543,16 @@ for global_step in range(args.max_iter):
                 y_fixed.data, '{0}/gen_{1}.png'.format(
                     save_dir, gen_iterations))
             vutils.save_image(
+                y_eval.data, '{0}/gen_eval_{1}.png'.format(
+                    save_dir, gen_iterations))
+            vutils.save_image(
                 f_dec_X_D.data, '{0}/ae_real_{1}.png'.format(
                     save_dir, gen_iterations))
             vutils.save_image(
                 f_dec_Y_D.data, '{0}/ae_gen_{1}.png'.format(
                     save_dir, gen_iterations))
-
-        if do_log(gen_iterations):
+            # Save states.
             torch.save(netG.state_dict(), '{0}/netG_iter_{1}.pth'.format(
                 save_dir, gen_iterations))
             torch.save(netD.state_dict(), '{0}/netD_iter_{1}.pth'.format(
                 save_dir, gen_iterations))
-
-        gen_iterations += 1

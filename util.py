@@ -32,6 +32,7 @@ def get_args(parser):
     parser.add_argument('--thin_type', type=str, default='logistic', help='type of thinning function', choices=['kernel', 'logistic'])
     parser.add_argument('--thinning_scale', type=float, default=0.5, help='Maximum of thinning_kernel. 1 / (1 - thinning_scale) defines max weight')
     parser.add_argument('--load_existing', type=int, default=0, help='Reference number of model state file inside the directory corresponding to hyperparams')
+    parser.add_argument('--num_pretrain', type=int, default=-1, help='Number of pretrain runs before weighted MMD')
     parser.add_argument('--tag', type=str, default='test', help='tag pre-pended to save_dir')
     return parser
 

@@ -1,11 +1,44 @@
 import numpy as np
 import pdb
+from sklearn.linear_model import LogisticRegression
 
 import sys
 refs = [int(i) for i in sys.argv[1:]]
 for ref in refs:
-    print
-    print 'Using reference {}'.format(ref)
+    m_enc = np.load('m_enc_{}.npy'.format(ref))
+    t_enc = np.load('t_enc_{}.npy'.format(ref))
+    x_enc = np.load('x_enc_{}.npy'.format(ref))
+    nm = m_enc.shape[0]
+    nt = t_enc.shape[0]
+    nx = x_enc.shape[0]
+    d = m_enc.shape[1]
+
+    # Compare encodings with logistic regression.
+    split = 100 
+    n_train, n_test = split, nm - split 
+    m_enc_train = m_enc[:n_train]
+    t_enc_train = t_enc[:n_train]
+    m_enc_test = m_enc[n_train:]
+    t_enc_test = t_enc[n_train:]
+    features_train = np.vstack((m_enc_train, t_enc_train))
+    labels_train = np.hstack((np.zeros(n_train), np.ones(n_train)))
+    features_test = np.vstack((m_enc_test, t_enc_test))
+    labels_test = np.hstack((np.zeros(n_test), np.ones(n_test)))
+    clf = LogisticRegression(C=1e15)
+    clf.fit(features_train, labels_train)
+    m_enc_probs = clf.predict_proba(m_enc_test) 
+    t_enc_probs = clf.predict_proba(t_enc_test) 
+    m_enc_prob1 = [p[1] for p in m_enc_probs]
+    t_enc_prob1 = [p[1] for p in t_enc_probs]
+    err0, err1 = np.mean(m_enc_prob1), np.mean(1. - np.array(t_enc_prob1))
+    print '\nScores for ref {}'.format(ref) 
+    print '  score={:.4f}'.format(clf.score(features_test, labels_test))
+    print '  error: main={:.4f}, target={:.4f}, all={:.4f}'.format(
+        err0, err1, err0+err1)
+    continue
+
+for ref in refs:
+    print '\nEncodings for ref {}'.format(ref) 
     m_enc = np.load('m_enc_{}.npy'.format(ref))
     t_enc = np.load('t_enc_{}.npy'.format(ref))
     x_enc = np.load('x_enc_{}.npy'.format(ref))
@@ -35,6 +68,7 @@ for ref in refs:
     # Compare main vs target mean encodings.
     print '  Norm |mean(m_enc) - mean(t_enc)| = {:.4f}'.format(
         np.linalg.norm(m_mean - t_mean))
+    continue
 
     # Which group to test. Change both together.
     names = ['target', 'main']
@@ -73,4 +107,3 @@ for ref in refs:
         print '  - Min/max/med p1p2_weights: {:.4f}, {:.4f}, {:.4f}'.format(
             np.min(p1p2_weights), np.max(p1p2_weights), np.median(p1p2_weights))
 
-pdb.set_trace()
