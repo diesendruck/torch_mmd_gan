@@ -17,6 +17,7 @@ import os
 import pdb
 import sys
 import timeit
+from sklearn.linear_model import LogisticRegression
 
 import util
 import base_module
@@ -73,10 +74,14 @@ parser = argparse.ArgumentParser()
 parser = util.get_args(parser)
 args = parser.parse_args()
 print(args)
+save_dir = 'results/{}_load{}_nz{}_dlr{}_glr{}_dits{}_dcs{}_ec{}_ts{}'.format(
+    args.tag, args.load_existing, args.nz, args.dlr, args.glr, args.Diters,
+    args.d_calibration_step, args.exp_const, args.thinning_scale)
 
-if args.experiment is None:
-    args.experiment = 'samples'
-os.system('mkdir {0}'.format(args.experiment))
+if save_dir is None:
+    save_dir = 'samples'
+if not os.path.exists(save_dir):
+    os.mkdir(save_dir)
 
 if torch.cuda.is_available():
     args.cuda = True
@@ -97,10 +102,14 @@ trn_dataset, trn_dataset_main, trn_dataset_target = (
     util.get_data(args, train_flag=True))
 trn_loader = torch.utils.data.DataLoader(trn_dataset,
     batch_size=args.batch_size, shuffle=True, num_workers=int(args.workers))
+loader_num = 200
 trn_loader_main = torch.utils.data.DataLoader(trn_dataset_main,
-    batch_size=2000, shuffle=True, num_workers=int(args.workers))
+    batch_size=loader_num, shuffle=True, num_workers=int(args.workers))
 trn_loader_target = torch.utils.data.DataLoader(trn_dataset_target,
-    batch_size=2000, shuffle=True, num_workers=int(args.workers))
+    batch_size=loader_num, shuffle=True, num_workers=int(args.workers))
+
+# "Label" one subset of the target data, to build thinning function.
+target_batch_cpu_labeled, _ = iter(trn_loader_target).next()
 
 # construct encoder/decoder modules
 hidden_dim = args.nz
@@ -116,26 +125,31 @@ print("netD:", netD)
 print("oneSide:", one_sided)
 
 # Load existing model, e.g. pretrained model.
-load_existing = 0
-if load_existing:
+if args.load_existing:
     try:
-        ref = 1000
-        netG.load_state_dict(torch.load(os.path.join(
-            args.experiment, 'refs', 'netG_iter_{}.pth'.format(ref))))
-        netD.load_state_dict(torch.load(os.path.join(
-            args.experiment, 'refs', 'netD_iter_{}.pth'.format(ref))))
+        ref = args.load_existing 
         gen_iterations = ref 
-        num_pretraining_iters = 1000 
+        num_pretraining_iters = 0 
+        #netG.load_state_dict(torch.load(os.path.join(
+        #    save_dir, 'netG_iter_{}.pth'.format(ref))))
+        #netD.load_state_dict(torch.load(os.path.join(
+        #    save_dir, 'netD_iter_{}.pth'.format(ref))))
+        netG.load_state_dict(torch.load(os.path.join(
+            'results', 'pretrain', 'netG_iter_{}.pth'.format(ref))))
+        netD.load_state_dict(torch.load(os.path.join(
+            'results', 'pretrain', 'netD_iter_{}.pth'.format(ref))))
         print('Loaded state_dict for iter {}'.format(ref))
     except Exception as e:
         print('Error on model load: {}'.format(e))
 # Or set up model from base.
 else:
+    gen_iterations = 0
+    num_pretraining_iters = -1 
     netG.apply(base_module.weights_init)
     netD.apply(base_module.weights_init)
     one_sided.apply(base_module.weights_init)
-    gen_iterations = 0
-    num_pretraining_iters = -1 
+    print('New model. Pretraining iters = {}.'.format(
+        num_pretraining_iters))
 
 # sigma for MMD
 base = 1.0
@@ -153,13 +167,14 @@ if args.cuda:
 fixed_noise = Variable(fixed_noise, requires_grad=False)
 
 # setup optimizer
-optimizerG = torch.optim.RMSprop(netG.parameters(), lr=args.lr)
-optimizerD = torch.optim.RMSprop(netD.parameters(), lr=args.lr)
+optimizerD = torch.optim.RMSprop(netD.parameters(), lr=args.dlr)
+optimizerG = torch.optim.RMSprop(netG.parameters(), lr=args.glr)
 
-lambda_MMD = 1.0
+lambda_MMD = 1000.0
 lambda_AE_X = 8.0
 lambda_AE_Y = 8.0
 lambda_rg = 16.0
+#lambda_rg = 0.0
 
 # TOGGLE WEIGHTING
 weighted = 1
@@ -168,7 +183,16 @@ if weighted:
 else:
     print 'Not weighted'
 
+
+def do_log(it):
+    if ((it <= 100 and it % 10 == 0) or (it % 200 == 0)):
+        return True
+    else:
+        return False
+
+
 time = timeit.default_timer()
+print(args)
 for global_step in range(args.max_iter):
     data_iter = iter(trn_loader)
     batch_iter = 0
@@ -177,15 +201,18 @@ for global_step in range(args.max_iter):
             p.requires_grad = True
 
         # Schedule of alternation between D and G updates.
-        if gen_iterations < 25 or gen_iterations % 500 == 0:
+        if gen_iterations < 25 or gen_iterations % args.d_calibration_step == 0:
             Diters = 100
             Giters = 1
         else:
-            Diters = 5
+            Diters = args.Diters
             Giters = 1
+        #if gen_iterations == 400:
+        #    args.glr = 5e-5
+        #    optimizerG = torch.optim.RMSprop(netG.parameters(), lr=args.glr)
 
         # Regulate when to start weighting.
-        if gen_iterations <= num_pretraining_iters:
+        if gen_iterations < num_pretraining_iters:
             weighted = 0
         else:
             weighted = 1
@@ -220,30 +247,46 @@ for global_step in range(args.max_iter):
 
             f_enc_Y_D, f_dec_Y_D = netD(y)
 
-            # Get mean and cov_inv for main (m) and target (t) set.
+            # Store mean and cov_inv for main (m) and target (t) set.
             main_batch_cpu, _ = iter(trn_loader_main).next()
             main_batch_enc, _ = netD(Variable(main_batch_cpu.cuda()))
             m_enc_np = main_batch_enc.cpu().data.numpy()
-            target_batch_cpu, _ = iter(trn_loader_target).next()
-            target_batch_enc, _ = netD(Variable(target_batch_cpu.cuda()))
+            # TODO: Actually resample.
+            target_resampled = target_batch_cpu_labeled
+            target_batch_enc, _ = netD(Variable(target_resampled.cuda()))
             t_enc_np = target_batch_enc.cpu().data.numpy()
-            if gen_iterations % 100 == 0:
-                np.save('m_enc_{}.npy'.format(gen_iterations), m_enc_np)
-                np.save('t_enc_{}.npy'.format(gen_iterations), t_enc_np)
-                np.save('x_enc_{}.npy'.format(gen_iterations),
-                        f_enc_X_D.cpu().data.numpy())
-            try:
-                t_cov_np = np.cov(t_enc_np, rowvar=False)
-                t_cov_inv_np = np.linalg.inv(t_cov_np)
-            except Exception as e:
-                print('D Update: Error: {}'.format(e))
-                np.save('t_enc_on_error.npy', t_enc_np)
-                sys.exit('d_it {}'.format(i))
-
-            t_mean_np = np.reshape(np.mean(t_enc_np, axis=0), [-1, 1])
-            t_mean = Variable(torch.from_numpy(t_mean_np)).cuda()
-            t_cov_inv = Variable(torch.from_numpy(t_cov_inv_np).type(
-                torch.FloatTensor)).cuda()
+            if do_log(gen_iterations):
+                np.save('{}/m_enc_{}.npy'.format(
+                    save_dir, gen_iterations), m_enc_np)
+                np.save('{}/t_enc_{}.npy'.format(
+                    save_dir, gen_iterations), t_enc_np)
+                np.save('{}/x_enc_{}.npy'.format(
+                    save_dir, gen_iterations), f_enc_X_D.cpu().data.numpy())
+            if args.thin_type == 'kernel':
+                # Pre-compute values for target kernel.
+                try:
+                    t_cov_np = np.cov(t_enc_np, rowvar=False)
+                    t_cov_inv_np = np.linalg.inv(t_cov_np)
+                    t_mean_np = np.reshape(np.mean(t_enc_np, axis=0), [-1, 1])
+                    t_mean = Variable(torch.from_numpy(t_mean_np)).cuda()
+                    t_cov_inv = Variable(torch.from_numpy(t_cov_inv_np).type(
+                        torch.FloatTensor)).cuda()
+                except Exception as e:
+                    print('D Update: Error: {}'.format(e))
+                    np.save('{}/t_enc_on_error.npy'.format(
+                        save_dir), t_enc_np)
+                    sys.exit('d_it {}'.format(i))
+            elif args.thin_type == 'logistic':
+                # Pre-compute logistic function for target/non-target points.
+                features = np.vstack((m_enc_np, t_enc_np))
+                labels = np.hstack((np.zeros(loader_num), np.ones(loader_num)))
+                clf = LogisticRegression(C=1e15)
+                clf.fit(features, labels)
+                x_enc_probs_np = clf.predict_proba(f_enc_X_D.cpu().data.numpy())
+                x_enc_prob1_np = np.array(
+                    [probs[1] for probs in x_enc_probs_np])
+                x_enc_prob1 = Variable(torch.from_numpy(x_enc_prob1_np).type(
+                    torch.FloatTensor)).cuda()
 
             # compute biased MMD2 and use ReLU to prevent negative value
             if not weighted:
@@ -251,13 +294,21 @@ for global_step in range(args.max_iter):
                     f_enc_X_D, f_enc_Y_D, sigma_list)
             else:
                 try:
-                    mmd2_D = mix_rbf_mmd2_weighted(
-                        f_enc_X_D, f_enc_Y_D, sigma_list, t_mean, t_cov_inv)
+                    if args.thin_type == 'kernel':
+                        mmd2_D = mix_rbf_mmd2_weighted(
+                            f_enc_X_D, f_enc_Y_D, sigma_list, args.exp_const,
+                            args.thinning_scale, t_mean=t_mean, t_cov_inv=t_cov_inv)
+                    elif args.thin_type == 'logistic':
+                        mmd2_D = mix_rbf_mmd2_weighted(
+                            f_enc_X_D, f_enc_Y_D, sigma_list, args.exp_const,
+                            args.thinning_scale, x_enc_prob1=x_enc_prob1)
+
                 except Exception as e:
                     print('D Update / Weighted MMD: Error: {}'.format(e))
-                    np.save('t_enc_on_error_in_weighted_mmd.npy', t_enc_np)
-                    np.save('X_on_error_in_weighted_mmd.npy',
-                        f_enc_X_D.cpu().data.numpy())
+                    np.save('{}/t_enc_on_error_in_weighted_mmd.npy'.format(
+                        save_dir), t_enc_np)
+                    np.save('{}/X_on_error_in_weighted_mmd.npy'.format(
+                        save_dir), f_enc_X_D.cpu().data.numpy())
             mmd2_D = F.relu(mmd2_D)
 
             # compute rank hinge loss
@@ -300,19 +351,39 @@ for global_step in range(args.max_iter):
 
             f_enc_Y, f_dec_Y = netD(y)
 
-            # Get mean and cov_inv for target set.
-            target_batch_cpu, _ = iter(trn_loader_target).next()
-            target_batch_enc, _ = netD(Variable(target_batch_cpu.cuda()))
+            # Store mean and cov_inv for main (m) and target (t) set.
+            main_batch_cpu, _ = iter(trn_loader_main).next()
+            main_batch_enc, _ = netD(Variable(main_batch_cpu.cuda()))
+            m_enc_np = main_batch_enc.cpu().data.numpy()
+            # TODO: Actually resample.
+            target_resampled = target_batch_cpu_labeled
+            target_batch_enc, _ = netD(Variable(target_resampled.cuda()))
             t_enc_np = target_batch_enc.cpu().data.numpy()
-            t_mean_np = np.reshape(np.mean(t_enc_np, axis=0), [-1, 1])
-            try:
-                t_cov_np = np.cov(t_enc_np, rowvar=False)
-                t_cov_inv = np.linalg.inv(t_cov_np)
-            except Exception as e:
-                print e
-            t_mean = Variable(torch.from_numpy(t_mean_np)).cuda()
-            t_cov_inv = Variable(torch.from_numpy(t_cov_inv_np).type(
-                torch.FloatTensor)).cuda()
+            if args.thin_type == 'kernel':
+                # Pre-compute values for target kernel.
+                try:
+                    t_cov_np = np.cov(t_enc_np, rowvar=False)
+                    t_cov_inv_np = np.linalg.inv(t_cov_np)
+                    t_mean_np = np.reshape(np.mean(t_enc_np, axis=0), [-1, 1])
+                    t_mean = Variable(torch.from_numpy(t_mean_np)).cuda()
+                    t_cov_inv = Variable(torch.from_numpy(t_cov_inv_np).type(
+                        torch.FloatTensor)).cuda()
+                except Exception as e:
+                    print('D Update: Error: {}'.format(e))
+                    np.save('{}/t_enc_on_error.npy'.format(
+                        save_dir), t_enc_np)
+                    sys.exit('d_it {}'.format(i))
+            elif args.thin_type == 'logistic':
+                # Pre-compute logistic function for target/non-target points.
+                features = np.vstack((m_enc_np, t_enc_np))
+                labels = np.hstack((np.zeros(loader_num), np.ones(loader_num)))
+                clf = LogisticRegression(C=1e15)
+                clf.fit(features, labels)
+                x_enc_probs_np = clf.predict_proba(f_enc_X.cpu().data.numpy())
+                x_enc_prob1_np = np.array(
+                    [probs[1] for probs in x_enc_probs_np])
+                x_enc_prob1 = Variable(torch.from_numpy(x_enc_prob1_np).type(
+                    torch.FloatTensor)).cuda()
 
             # compute biased MMD2 and use ReLU to prevent negative value
             if not weighted:
@@ -320,23 +391,29 @@ for global_step in range(args.max_iter):
                     f_enc_X, f_enc_Y, sigma_list)
             else:    
                 try:
-                    mmd2_G = mix_rbf_mmd2_weighted(
-                        f_enc_X, f_enc_Y, sigma_list, t_mean, t_cov_inv)
+                    if args.thin_type == 'kernel':
+                        mmd2_G = mix_rbf_mmd2_weighted(
+                            f_enc_X, f_enc_Y, sigma_list, args.exp_const,
+                            args.thinning_scale, t_mean=t_mean, t_cov_inv=t_cov_inv)
+                    elif args.thin_type == 'logistic':
+                        mmd2_G = mix_rbf_mmd2_weighted(
+                            f_enc_X, f_enc_Y, sigma_list, args.exp_const,
+                            args.thinning_scale, x_enc_prob1=x_enc_prob1)
                 except Exception as e:
+                    pdb.set_trace()
                     print('G Update / Weighted MMD: Error: {}'.format(e))
-                    np.save('t_enc_on_error_in_weighted_mmd.npy', t_enc_np)
-                    np.save('X_on_error_in_weighted_mmd.npy',
-                        f_enc_X.cpu().data.numpy())
+                    np.save('{}/t_enc_on_error_in_weighted_mmd.npy'.format(
+                        save_dir), t_enc_np)
+                    np.save('{}/X_on_error_in_weighted_mmd.npy'.format(
+                        save_dir), f_enc_X.cpu().data.numpy())
             mmd2_G = F.relu(mmd2_G)
 
             # compute rank hinge loss
             one_side_errG = one_sided(f_enc_X.mean(0) - f_enc_Y.mean(0))
 
-            errG = torch.sqrt(mmd2_G) + lambda_rg * one_side_errG
+            errG = lambda_MMD * torch.sqrt(mmd2_G) + lambda_rg * one_side_errG
             errG.backward(one)
             optimizerG.step()
-
-            gen_iterations += 1
 
         run_time = (timeit.default_timer() - time) / 60.0
         if batch_iter % len(trn_loader) == 0:
@@ -350,8 +427,7 @@ for global_step in range(args.max_iter):
                      f_enc_X_D.mean().data[0], f_enc_Y_D.mean().data[0],
                      base_module.grad_norm(netD), base_module.grad_norm(netG)))
 
-        if ((gen_iterations <= 25 and gen_iterations % 5 == 0) or
-            (gen_iterations % 100 == 0)):
+        if do_log(gen_iterations):
             y_fixed = netG(fixed_noise)
             y_fixed.data = y_fixed.data.mul(0.5).add(0.5)
             f_dec_X_D = f_dec_X_D.view(f_dec_X_D.size(0), args.nc,
@@ -362,19 +438,21 @@ for global_step in range(args.max_iter):
             f_dec_Y_D.data = f_dec_Y_D.data.mul(0.5).add(0.5)
             vutils.save_image(
                 x.data, '{0}/real_{1}.png'.format(
-                    args.experiment, gen_iterations))
+                    save_dir, gen_iterations))
             vutils.save_image(
                 y_fixed.data, '{0}/gen_{1}.png'.format(
-                    args.experiment, gen_iterations))
+                    save_dir, gen_iterations))
             vutils.save_image(
                 f_dec_X_D.data, '{0}/ae_real_{1}.png'.format(
-                    args.experiment, gen_iterations))
+                    save_dir, gen_iterations))
             vutils.save_image(
                 f_dec_Y_D.data, '{0}/ae_gen_{1}.png'.format(
-                    args.experiment, gen_iterations))
+                    save_dir, gen_iterations))
 
-        if gen_iterations % 100 == 0:
+        if do_log(gen_iterations):
             torch.save(netG.state_dict(), '{0}/netG_iter_{1}.pth'.format(
-                args.experiment, gen_iterations))
+                save_dir, gen_iterations))
             torch.save(netD.state_dict(), '{0}/netD_iter_{1}.pth'.format(
-                args.experiment, gen_iterations))
+                save_dir, gen_iterations))
+
+        gen_iterations += 1

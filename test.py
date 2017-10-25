@@ -1,7 +1,8 @@
 import numpy as np
 import pdb
 
-refs = [1500]
+import sys
+refs = [int(i) for i in sys.argv[1:]]
 for ref in refs:
     print
     print 'Using reference {}'.format(ref)
@@ -49,14 +50,14 @@ for ref in refs:
         tkp = thinning_kernel_part
         tkp_diag = np.diag(tkp)
         tkp_diag_max = np.max(tkp_diag)
-        THINNING_SCALE = 0.5
-        assert (THINNING_SCALE > 0 and THINNING_SCALE < 1)
-        thinning_kernel = THINNING_SCALE * tkp_diag / tkp_diag_max
+        thinning_scale = 0.5
+        assert (thinning_scale > 0 and thinning_scale < 1)
+        thinning_kernel = thinning_scale * tkp_diag / tkp_diag_max
         keeping_probs = 1. - thinning_kernel
         print '\n  {}'.format(name)
         print '  - With thinning exp part constant={}'.format(CONST)
-        print '  - With thinning scale factor={}'.format(THINNING_SCALE)
-        print '  - keeping_probs: min={}, max={}, mean={}'.format(
+        print '  - With thinning scale factor={}'.format(thinning_scale)
+        print '  - keeping_probs: min={:.4f}, max={:.4f}, median={:.4f}'.format(
             np.min(keeping_probs), np.max(keeping_probs), np.median(keeping_probs))
         kp = np.reshape(keeping_probs, [-1, 1])
         kp_horiz = np.tile(kp, [1, num])
@@ -67,7 +68,9 @@ for ref in refs:
         p1_weights_normed = p1_weights / np.sum(p1_weights)
         p1p2_weights_normed = p1p2_weights / np.sum(p1p2_weights)
 
-        print '  - Min/max p1_weights: {}, {}'.format(
-            np.min(p1_weights), np.max(p1_weights))
-        print '  - Min/max p1p2_weights: {}, {}'.format(
-            np.min(p1p2_weights), np.max(p1p2_weights))
+        print '  - Min/max/med p1_weights: {:.4f}, {:.4f}, {:.4f}'.format(
+            np.min(p1_weights), np.max(p1_weights), np.median(p1_weights))
+        print '  - Min/max/med p1p2_weights: {:.4f}, {:.4f}, {:.4f}'.format(
+            np.min(p1p2_weights), np.max(p1p2_weights), np.median(p1p2_weights))
+
+pdb.set_trace()

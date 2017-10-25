@@ -13,20 +13,26 @@ from os.path import join
 
 
 def get_args(parser):
-    parser.add_argument('--dataset', required=True, help='mnist | cifar10 | cifar100 | lsun | imagenet | folder | lfw ')
-    parser.add_argument('--dataroot', required=True, help='path to dataset')
+    parser.add_argument('--dataset', type=str, default='mnist', help='mnist | cifar10 | cifar100 | lsun | imagenet | folder | lfw ')
+    parser.add_argument('--dataroot', default='./data/mnist', help='path to dataset')
     parser.add_argument('--workers', type=int, help='number of data loading workers', default=4)
     parser.add_argument('--batch_size', type=int, default=64, help='input batch size')
-    parser.add_argument('--image_size', type=int, default=64, help='the height / width of the input image to network')
-    parser.add_argument('--nc', type=int, default=3, help='number of channel')
-    parser.add_argument('--nz', type=int, default=100, help='size of the latent z vector')
-    parser.add_argument('--max_iter', type=int, default=100, help='number of epochs to train for')
-    parser.add_argument('--lr', type=float, default=0.00005, help='learning rate, default=0.00005')
+    parser.add_argument('--image_size', type=int, default=32, help='the height / width of the input image to network')
+    parser.add_argument('--nc', type=int, default=1, help='number of channel')
+    parser.add_argument('--nz', type=int, default=10, help='size of the latent z vector')
+    parser.add_argument('--max_iter', type=int, default=1500, help='number of epochs to train for')
+    parser.add_argument('--glr', type=float, default=0.00005, help='learning rate, default=0.00005')
+    parser.add_argument('--dlr', type=float, default=0.00005, help='learning rate, default=0.00005')
     parser.add_argument('--gpu_device', type=int, default=0, help='using gpu device id')
     parser.add_argument('--netG', default='', help="path to netG (to continue training)")
     parser.add_argument('--netD', default='', help="path to netD (to continue training)")
     parser.add_argument('--Diters', type=int, default=5, help='number of D iters per each G iter')
-    parser.add_argument('--experiment', default=None, help='Where to store samples and models')
+    parser.add_argument('--d_calibration_step', type=int, default=500, help='number of G iters between big n=100 Diter steps')
+    parser.add_argument('--exp_const', type=float, default=0.05, help='constant from thinning_kernel_part')
+    parser.add_argument('--thin_type', type=str, default='logistic', help='type of thinning function', choices=['kernel', 'logistic'])
+    parser.add_argument('--thinning_scale', type=float, default=0.5, help='Maximum of thinning_kernel. 1 / (1 - thinning_scale) defines max weight')
+    parser.add_argument('--load_existing', type=int, default=0, help='Reference number of model state file inside the directory corresponding to hyperparams')
+    parser.add_argument('--tag', type=str, default='test', help='tag pre-pended to save_dir')
     return parser
 
 
@@ -103,13 +109,14 @@ def get_data(args, train_flag=True):
                              train=train_flag,
                              transform=transform)
         # Fetch only zeros and twos.
-        dataset_zero = (
+        dataset_main = (
             [v for i,v in enumerate(dataset) if dataset.train_labels[i] == 0])
-        dataset_two = (
-            [v for i,v in enumerate(dataset) if dataset.train_labels[i] == 2])
-        dataset_zerotwo = dataset_zero + dataset_two[:len(dataset_two)/4]
-        print('Made a dataset thats 2:1 zeros to twos.')
-        return dataset_zerotwo, dataset_zero, dataset_two
+        dataset_target = (
+            [v for i,v in enumerate(dataset) if dataset.train_labels[i] == 1])
+        dataset_mixed = dataset_main + dataset_target[:len(dataset_target)/4]
+        print('Made a dataset that is {} main and {} target.'.format(
+            len(dataset_main), len(dataset_target)/4))
+        return dataset_mixed, dataset_main, dataset_target
 
     elif args.dataset == 'celeba':
         imdir = 'train' if train_flag else 'val'
