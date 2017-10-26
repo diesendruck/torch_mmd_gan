@@ -74,9 +74,9 @@ parser = argparse.ArgumentParser()
 parser = util.get_args(parser)
 args = parser.parse_args()
 print(args)
-save_dir = 'results/{}_load{}_nz{}_dlr{}_glr{}_dits{}_dcs{}_ec{}_ts{}'.format(
+save_dir = 'results/{}_load{}_nz{}_dlr{}_glr{}_dits{}_dcs{}_lambdammd{}_ec{}_ts{}'.format(
     args.tag, args.load_existing, args.nz, args.dlr, args.glr, args.Diters,
-    args.d_calibration_step, args.exp_const, args.thinning_scale)
+    args.d_calibration_step, args.lambda_mmd, args.exp_const, args.thinning_scale)
 
 if save_dir is None:
     save_dir = 'samples'
@@ -133,7 +133,7 @@ if args.load_existing:
     try:
         ref = args.load_existing 
         gen_iterations = ref 
-        num_pretraining_iters = 0 
+        num_pretrain_iters = 0 
         #netG.load_state_dict(torch.load(os.path.join(
         #    save_dir, 'netG_iter_{}.pth'.format(ref))))
         #netD.load_state_dict(torch.load(os.path.join(
@@ -143,17 +143,19 @@ if args.load_existing:
         netD.load_state_dict(torch.load(os.path.join(
             'results', 'pretrain', 'netD_iter_{}.pth'.format(ref))))
         print('Loaded state_dict for iter {}'.format(ref))
+        args.Diters = 1
+        print('Set Diters to 0')
     except Exception as e:
         print('Error on model load: {}'.format(e))
 # Or set up model from base.
 else:
     gen_iterations = 0
-    num_pretraining_iters = args.num_pretrain
+    num_pretrain_iters = args.num_pretrain
     netG.apply(base_module.weights_init)
     netD.apply(base_module.weights_init)
     one_sided.apply(base_module.weights_init)
     print('New model. Pretraining iters = {}.'.format(
-        num_pretraining_iters))
+        num_pretrain_iters))
 
 # sigma for MMD
 base = 1.0
@@ -174,7 +176,7 @@ fixed_noise = Variable(fixed_noise, requires_grad=False)
 optimizerD = torch.optim.RMSprop(netD.parameters(), lr=args.dlr)
 optimizerG = torch.optim.RMSprop(netG.parameters(), lr=args.glr)
 
-lambda_MMD = 1.0
+lambda_MMD = args.lambda_mmd 
 lambda_AE_X = 8.0
 lambda_AE_Y = 8.0
 lambda_rg = 16.0
@@ -192,7 +194,7 @@ def do_log(it):
     #    return True
     #else:
     #    return False
-    return it % 10 == 0
+    return it % 100 == 0
 
 if args.thin_type == 'logistic':
     data_initial = iter(trn_loader_initial).next()
@@ -221,7 +223,7 @@ for global_step in range(args.max_iter):
         Giters = 1
 
         # Regulate when to start weighting.
-        if gen_iterations < num_pretraining_iters:
+        if gen_iterations < num_pretrain_iters:
             weighted = 0
         else:
             weighted = 1
@@ -375,7 +377,13 @@ for global_step in range(args.max_iter):
             errD = (torch.sqrt(mmd2_D) + lambda_rg * one_side_errD -
                 lambda_AE_X * L2_AE_X_D - lambda_AE_Y * L2_AE_Y_D)
             errD.backward(mone)
-            optimizerD.step()
+
+            # Skip D step if loading existing, and not pretraining.
+            if (num_pretrain_iters == 0 and args.load_existing):
+                pass
+            else:
+                optimizerD.step()
+
         # ---------------------------
         #        END: Optimize over NetD
         # ---------------------------

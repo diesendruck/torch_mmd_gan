@@ -23,6 +23,7 @@ def get_args(parser):
     parser.add_argument('--max_iter', type=int, default=1500, help='number of epochs to train for')
     parser.add_argument('--glr', type=float, default=0.00005, help='learning rate, default=0.00005')
     parser.add_argument('--dlr', type=float, default=0.00005, help='learning rate, default=0.00005')
+    parser.add_argument('--lambda_mmd', type=float, default=1.0, help='scale factor for MMD, exclusively in errG')
     parser.add_argument('--gpu_device', type=int, default=0, help='using gpu device id')
     parser.add_argument('--netG', default='', help="path to netG (to continue training)")
     parser.add_argument('--netD', default='', help="path to netD (to continue training)")
