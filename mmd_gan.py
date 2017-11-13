@@ -69,28 +69,30 @@ class ONE_SIDED(nn.Module):
         return output
 
 
-# Get argument
+# Get arguments.
 parser = argparse.ArgumentParser()
 parser = util.get_args(parser)
 args = parser.parse_args()
 print(args)
-save_dir = 'results/{}_wt{}_sch-{}_load{}_nz{}_dlr{}_glr{}_dits{}_dcs{}_lambdammd{}_ec{}_ts{}'.format(
-    args.tag, args.weighted, args.schedule, args.load_existing, args.nz, args.dlr, args.glr,
-    args.Diters, args.d_calibration_step, args.lambda_mmd, args.exp_const,
-    args.thinning_scale)
+save_dir = ('results/{}_testmix{}_sch-{}_load{}_nz{}_dlr{}_glr{}_dits{}_'
+    'dcs{}_lambdammd{}_ec{}_ts{}').format(
+        args.tag, args.test_mix, args.schedule, args.load_existing, args.nz,
+        args.dlr, args.glr, args.Diters, args.d_calibration_step,
+        args.lambda_mmd, args.exp_const, args.thinning_scale)
 
+# Set up directories.
 if save_dir is None:
     save_dir = 'samples'
 if not os.path.exists(save_dir):
     os.mkdir(save_dir)
 
+# Set up GPU.
 if torch.cuda.is_available():
     args.cuda = True
     torch.cuda.set_device(args.gpu_device)
     print("Using GPU device", torch.cuda.current_device())
 else:
     raise EnvironmentError("GPU device not available!")
-
 args.manual_seed = 1126
 np.random.seed(seed=args.manual_seed)
 random.seed(args.manual_seed)
@@ -98,30 +100,51 @@ torch.manual_seed(args.manual_seed)
 torch.cuda.manual_seed(args.manual_seed)
 cudnn.benchmark = True
 
-# Get data
-trn_dataset, trn_dataset_main, trn_dataset_target = (
+# Get data.
+trn_dataset_8020, trn_dataset_5050, trn_dataset_main, trn_dataset_target = (
     util.get_data(args, train_flag=True))
-trn_loader = torch.utils.data.DataLoader(trn_dataset,
-    batch_size=args.batch_size, shuffle=True, num_workers=int(args.workers))
-trn_loader_eval = torch.utils.data.DataLoader(trn_dataset,
-    batch_size=args.batch_size, shuffle=True, num_workers=int(args.workers))
-trn_loader_initial = torch.utils.data.DataLoader(trn_dataset,
-    batch_size=1000, shuffle=True, num_workers=int(args.workers))
-loader_num = 200
-trn_loader_main = torch.utils.data.DataLoader(trn_dataset_main,
-    batch_size=loader_num, shuffle=True, num_workers=int(args.workers))
-trn_loader_target = torch.utils.data.DataLoader(trn_dataset_target,
-    batch_size=loader_num, shuffle=True, num_workers=int(args.workers))
+def make_data_handlers(mix):
+    assert mix in ['8020', '5050']
+    if mix == '8020':
+        trn_dataset = trn_dataset_8020
+    elif mix == '5050':
+        trn_dataset = trn_dataset_5050
+    trn_loader = torch.utils.data.DataLoader(trn_dataset,
+        batch_size=args.batch_size, shuffle=True, num_workers=int(args.workers))
+    trn_loader_eval = torch.utils.data.DataLoader(trn_dataset,
+        batch_size=args.batch_size, shuffle=True, num_workers=int(args.workers))
+    trn_loader_initial = torch.utils.data.DataLoader(trn_dataset,
+        batch_size=1000, shuffle=True, num_workers=int(args.workers))
+    loader_num = 200
+    trn_loader_main = torch.utils.data.DataLoader(trn_dataset_main,
+        batch_size=loader_num, shuffle=True, num_workers=int(args.workers))
+    trn_loader_target = torch.utils.data.DataLoader(trn_dataset_target,
+        batch_size=loader_num, shuffle=True, num_workers=int(args.workers))
+    print('Made data handlers for mix {}'.format(mix))
+    return (trn_dataset, trn_dataset_main, trn_dataset_target, trn_loader,
+        trn_loader_eval, trn_loader_initial, trn_loader_main, trn_loader_target)
+mix = '5050'
+(trn_dataset, trn_dataset_main, trn_dataset_target, trn_loader, trn_loader_eval,
+    trn_loader_initial, trn_loader_main, trn_loader_target) = (
+        make_data_handlers(mix))
+
+# Set up loader for specific mix, if needed.
+if args.test_mix:
+    trn_dataset_mix, _, _, _ = util.get_data(args, train_flag=True,
+        mix=args.test_mix)
+    trn_loader_mix = torch.utils.data.DataLoader(trn_dataset_mix,
+        batch_size=args.batch_size, shuffle=True,
+        num_workers=int(args.workers))
+
 
 # "Label" one subset of the target data, to build thinning function.
 target_batch_cpu_labeled, _ = iter(trn_loader_target).next()
 
-# construct encoder/decoder modules
+# Construct encoder/decoder modules.
 hidden_dim = args.nz
 G_decoder = base_module.Decoder(args.image_size, args.nc, k=args.nz, ngf=64)
 D_encoder = base_module.Encoder(args.image_size, args.nc, k=hidden_dim, ndf=64)
 D_decoder = base_module.Decoder(args.image_size, args.nc, k=hidden_dim, ngf=64)
-
 netG = NetG(G_decoder)
 netD = NetD(D_encoder, D_decoder)
 one_sided = ONE_SIDED()
@@ -158,12 +181,12 @@ else:
     print('New model. Pretraining iters = {}.'.format(
         num_pretrain))
 
-# sigma for MMD
+# Set sigma for MMD.
 base = 1.0
 sigma_list = [1, 2, 4, 8, 16]
 sigma_list = [sigma / base for sigma in sigma_list]
 
-# put variable into cuda device
+# Put variable into cuda device.
 fixed_noise = torch.cuda.FloatTensor(64, args.nz, 1, 1).normal_(0, 1)
 one = torch.cuda.FloatTensor([1])
 mone = one * -1
@@ -173,30 +196,27 @@ if args.cuda:
     one_sided.cuda()
 fixed_noise = Variable(fixed_noise, requires_grad=False)
 
-# setup optimizer
+# Set up optimizers.
 optimizerD = torch.optim.RMSprop(netD.parameters(), lr=args.dlr)
 optimizerG = torch.optim.RMSprop(netG.parameters(), lr=args.glr)
 
+# Assign weights to components in objective functions.
 lambda_MMD = args.lambda_mmd 
 lambda_AE_X = 8.0
 lambda_AE_Y = 8.0
 lambda_rg = 16.0
 
-# TOGGLE WEIGHTING
-weighted = args.weighted
-if weighted:
-    print 'WEIGHTED'
-else:
-    print 'Not weighted'
-
 
 def do_log(it):
+    '''Customize when to do logging.'''
     #if ((it <= 100 and it % 10 == 0) or (it % 200 == 0)):
     #    return True
     #else:
     #    return False
     return it % 100 == 0
 
+
+# Get data and labels of initial labeled set, for logistic thinning.
 if args.thin_type == 'logistic':
     data_initial = iter(trn_loader_initial).next()
     x_init_cpu, x_init_labels_cpu = data_initial
@@ -205,9 +225,8 @@ if args.thin_type == 'logistic':
 
 time = timeit.default_timer()
 print(args)
-#for global_step in range(args.max_iter):
-for global_step in range(1000000):
-    if gen_iterations > args.max_iter:  # Run at least 15k generator iterations.
+for global_step in range(args.max_iter):
+    if gen_iterations > args.max_iter:
         break
     data_iter = iter(trn_loader)
     data_iter_eval = iter(trn_loader_eval)
@@ -228,11 +247,20 @@ for global_step in range(1000000):
             Diters = args.Diters
             Giters = 1
 
-        # Regulate when to start weighting.
+        # Regulate PRETRAINING and when to start weighting.
         if gen_iterations < num_pretrain:
             weighted = 0
         else:
             weighted = 1
+            # Only once, now that we're weighting, redefine all data handlers.
+            if gen_iterations == num_pretrain:
+                (trn_dataset, trn_dataset_main, trn_dataset_target, trn_loader,
+                    trn_loader_eval, trn_loader_initial, trn_loader_main,
+                    trn_loader_target) = (
+                        make_data_handlers('8020'))
+                data_iter = iter(trn_loader)
+                data_iter_eval = iter(trn_loader_eval)
+                batch_iter = 0
 
         # ---------------------------
         #        BEGIN: Optimize over NetD
@@ -250,10 +278,10 @@ for global_step in range(1000000):
             batch_iter += 1
             netD.zero_grad()
 
+            # Sample from data and encode.
             x_cpu, xlab_cpu = data
             x = Variable(x_cpu.cuda())
             batch_size = x.size(0)
-
             f_enc_X_D, f_dec_X_D = netD(x)
 
             # Sample from generator and encode.
@@ -261,8 +289,15 @@ for global_step in range(1000000):
                 batch_size, args.nz, 1, 1).normal_(0, 1)
             noise = Variable(noise, volatile=True)  # total freeze netG
             y = Variable(netG(noise).data)
-
             f_enc_Y_D, f_dec_Y_D = netD(y)
+
+            # For testing, override generator, and sample from known mix.
+            if args.test_mix:
+                batch_mix, _ = iter(trn_loader_mix).next()
+                if len(batch_mix) != batch_size:
+                    #print 'trimming batch_mix to batch_size'
+                    batch_mix = batch_mix[:batch_size]
+                f_enc_Y_D, f_dec_Y_D = netD(Variable(batch_mix.cuda()))
 
             # Store mean and cov_inv for main (m) and target (t) set.
             main_batch_cpu, _ = iter(trn_loader_main).next()
@@ -349,6 +384,9 @@ for global_step in range(1000000):
                     [probs[1] for probs in x_enc_probs_np])
                 x_enc_p1 = Variable(torch.from_numpy(x_enc_p1_np).type(
                     torch.FloatTensor)).cuda()
+                # For test_mix, redefine probs based on true labels.
+                if args.test_mix:
+                    x_enc_p1 = Variable(xlab_cpu.type(torch.FloatTensor)).cuda()
 
             # compute biased MMD2 and use ReLU to prevent negative value
             if not weighted:
@@ -366,6 +404,7 @@ for global_step in range(1000000):
 
                 except Exception as e:
                     print('D Update / Weighted MMD: Error: {}'.format(e))
+                    pdb.set_trace()
                     np.save('{}/t_enc_on_error_in_weighted_mmd.npy'.format(
                         save_dir), t_enc_np)
                     np.save('{}/X_on_error_in_weighted_mmd.npy'.format(
@@ -397,6 +436,7 @@ for global_step in range(1000000):
         # ---------------------------
         #        BEGIN: Optimize over NetG
         # ---------------------------
+        
         for p in netD.parameters():
             p.requires_grad = False
 
@@ -438,10 +478,10 @@ for global_step in range(1000000):
                     t_cov_inv = Variable(torch.from_numpy(t_cov_inv_np).type(
                         torch.FloatTensor)).cuda()
                 except Exception as e:
-                    print('D Update: Error: {}'.format(e))
+                    print('G Update: Error: {}'.format(e))
                     np.save('{}/t_enc_on_error.npy'.format(
                         save_dir), t_enc_np)
-                    sys.exit('d_it {}'.format(i))
+                    sys.exit('g_it {}'.format(j))
             elif args.thin_type == 'logistic':
                 # Learn logistic regr using current encoder on initial data.
                 x_init_enc, _ = netD(x_init)
@@ -500,8 +540,8 @@ for global_step in range(1000000):
                             f_enc_X, f_enc_Y, sigma_list, args.exp_const,
                             args.thinning_scale, x_enc_p1=x_enc_p1)
                 except Exception as e:
-                    pdb.set_trace()
                     print('G Update / Weighted MMD: Error: {}'.format(e))
+                    pdb.set_trace()
                     np.save('{}/t_enc_on_error_in_weighted_mmd.npy'.format(
                         save_dir), t_enc_np)
                     np.save('{}/X_on_error_in_weighted_mmd.npy'.format(
@@ -518,6 +558,69 @@ for global_step in range(1000000):
         # ---------------------------
         #        END: Optimize over NetG
         # ---------------------------
+
+
+        # ------------------------------------
+        #        LOGGING and OTHER DIAGNOSTICS 
+        # ------------------------------------
+         
+        # Do diagnostics with given autoencoder.
+        if args.diagnostic:
+            if gen_iterations == 10000:
+                # Compare MMDs of 50/50 data with various data mixes.
+                x_enc_5050 = f_enc_X
+                y_enc_5050 = f_enc_Y
+                mmds_x5050_mix = []
+                mmds_y5050_mix = []
+                wmmds_x5050_mix = []
+                wmmds_y5050_mix = []
+                for mix in ['1090', '2080', '3070', '4060', '5050', '6040', '7030',
+                        '8020', '9010']:
+                    # Get data mix.
+                    trn_dataset_mix, _, _, _ = util.get_data(args, train_flag=True,
+                        mix=mix)
+                    trn_loader_mix = torch.utils.data.DataLoader(trn_dataset_mix,
+                        batch_size=args.batch_size, shuffle=True,
+                        num_workers=int(args.workers))
+                    batch_mix, _ = iter(trn_loader_mix).next()
+                    x_enc_mix, _ = netD(Variable(batch_mix.cuda()))
+                    # Get thinning fn values for 50/50 x, and for 50/50 y. 
+                    x_enc_5050_np = x_enc_5050.cpu().data.numpy()  # For x_enc.
+                    x_enc_5050_probs_np = clf.predict_proba(x_enc_5050_np)
+                    x_enc_5050_p1_np = np.array(
+                        [probs[1] for probs in x_enc_5050_probs_np])
+                    x_enc_5050_p1 = Variable(torch.from_numpy(
+                        x_enc_5050_p1_np).type(torch.FloatTensor)).cuda()
+                    y_enc_5050_np = y_enc_5050.cpu().data.numpy()  # For y_enc.
+                    y_enc_5050_probs_np = clf.predict_proba(y_enc_5050_np)
+                    y_enc_5050_p1_np = np.array(
+                        [probs[1] for probs in y_enc_5050_probs_np])
+                    y_enc_5050_p1 = Variable(torch.from_numpy(
+                        y_enc_5050_p1_np).type(torch.FloatTensor)).cuda()
+                    # Compute and store mmd2 for each case.
+                    mmd_x5050_mix = mix_rbf_mmd2(x_enc_5050, x_enc_mix, sigma_list)
+                    mmd_y5050_mix = mix_rbf_mmd2(y_enc_5050, x_enc_mix, sigma_list)
+                    wmmd_x5050_mix = mix_rbf_mmd2_weighted(
+                        x_enc_5050, x_enc_mix, sigma_list, args.exp_const,
+                        args.thinning_scale, x_enc_p1=x_enc_5050_p1)
+                    wmmd_y5050_mix = mix_rbf_mmd2_weighted(
+                        y_enc_5050, x_enc_mix, sigma_list, args.exp_const,
+                        args.thinning_scale, x_enc_p1=y_enc_5050_p1)
+                    mmds_x5050_mix.append(mmd_x5050_mix)
+                    mmds_y5050_mix.append(mmd_y5050_mix)
+                    wmmds_x5050_mix.append(wmmd_x5050_mix)
+                    wmmds_y5050_mix.append(wmmd_y5050_mix)
+
+                mmds_xvm = [t.cpu().data.numpy()[0] for t in mmds_x5050_mix]
+                mmds_yvm = [t.cpu().data.numpy()[0] for t in mmds_y5050_mix]
+                wmmds_xvm = [t.cpu().data.numpy()[0] for t in wmmds_x5050_mix]
+                wmmds_yvm = [t.cpu().data.numpy()[0] for t in wmmds_y5050_mix]
+                np.save(os.path.join(save_dir, 'mmds_xvm.npy'), mmds_xvm)
+                np.save(os.path.join(save_dir, 'mmds_yvm.npy'), mmds_yvm)
+                np.save(os.path.join(save_dir, 'wmmds_xvm.npy'), wmmds_xvm)
+                np.save(os.path.join(save_dir, 'wmmds_yvm.npy'), wmmds_yvm)
+                pdb.set_trace()
+                sys.exit('Finished diagnostics. I\'m out')
 
         # Do various logs and print summaries.
         run_time = (timeit.default_timer() - time) / 60.0
@@ -573,5 +676,8 @@ for global_step in range(1000000):
                 save_dir, gen_iterations))
             torch.save(netD.state_dict(), '{0}/netD_iter_{1}.pth'.format(
                 save_dir, gen_iterations)) 
+            # Save wmmd2 for the run.
+            with open(os.path.join(save_dir, 'wmmd.txt'), 'a') as f:
+                f.write('{:.6f}\n'.format(mmd2_D.data[0]))
 
         gen_iterations += 1

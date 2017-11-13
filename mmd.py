@@ -191,7 +191,7 @@ def mix_rbf_mmd2_weighted(X, Y, sigma_list, exp_const, thinning_scale,
     K_XY = K[:m, m:]
     K_YY = K[m:, m:]
 
-    # Get weights, and apply them to the kernel matrix for X's only.
+    # Kernel thinning. Get weights, apply to kernel matrix for X's only.
     if t_mean is not None:
         k = t_mean.size(0)
         xt_ = X - t_mean.t().expand_as(X)
@@ -213,6 +213,7 @@ def mix_rbf_mmd2_weighted(X, Y, sigma_list, exp_const, thinning_scale,
         keeping_probs = 1. - thinning_kernel
         keeping_probs_horiz = keeping_probs.expand_as(tkp)
         keeping_probs_vert = keeping_probs_horiz.t()
+    # Logistic thinning.
     elif x_enc_p1 is not None:
         xp1 = x_enc_p1.unsqueeze(1)
         xp1_scaled = thinning_scale * xp1 
