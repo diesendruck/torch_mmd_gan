@@ -75,10 +75,11 @@ parser = util.get_args(parser)
 args = parser.parse_args()
 print(args)
 save_dir = ('results/{}_testmix{}_sch-{}_load{}_nz{}_dlr{}_glr{}_dits{}_'
-    'dcs{}_lambdammd{}_ec{}_ts{}').format(
+    'dcs{}_lambdas-mmd{}-ae{}-rg{}_ec{}_ts{}').format(
         args.tag, args.test_mix, args.schedule, args.load_existing, args.nz,
         args.dlr, args.glr, args.Diters, args.d_calibration_step,
-        args.lambda_mmd, args.exp_const, args.thinning_scale)
+        args.lambda_mmd, args.lambda_ae, args.lambda_rg,
+        args.exp_const, args.thinning_scale)
 
 # Set up directories.
 if save_dir is None:
@@ -103,10 +104,13 @@ cudnn.benchmark = True
 # Get data.
 trn_dataset_8020, trn_dataset_5050, trn_dataset_main, trn_dataset_target = (
     util.get_data(args, train_flag=True))
+trn_dataset_6040, _, _, _ = util.get_data(args, train_flag=True, mix='6040')
 def make_data_handlers(mix):
-    assert mix in ['8020', '5050']
+    assert mix in ['8020', '6040', '5050']
     if mix == '8020':
         trn_dataset = trn_dataset_8020
+    elif mix == '6040':
+        trn_dataset = trn_dataset_6040
     elif mix == '5050':
         trn_dataset = trn_dataset_5050
     trn_loader = torch.utils.data.DataLoader(trn_dataset,
@@ -123,7 +127,7 @@ def make_data_handlers(mix):
     print('Made data handlers for mix {}'.format(mix))
     return (trn_dataset, trn_dataset_main, trn_dataset_target, trn_loader,
         trn_loader_eval, trn_loader_initial, trn_loader_main, trn_loader_target)
-mix = '5050'
+mix = '6040'
 (trn_dataset, trn_dataset_main, trn_dataset_target, trn_loader, trn_loader_eval,
     trn_loader_initial, trn_loader_main, trn_loader_target) = (
         make_data_handlers(mix))
@@ -201,7 +205,7 @@ optimizerD = torch.optim.RMSprop(netD.parameters(), lr=args.dlr)
 optimizerG = torch.optim.RMSprop(netG.parameters(), lr=args.glr)
 
 # Assign weights to components in objective functions.
-lambda_MMD = args.lambda_mmd 
+lambda_MMD = 1.0
 lambda_AE_X = 8.0
 lambda_AE_Y = 8.0
 lambda_rg = 16.0
@@ -249,15 +253,19 @@ for global_step in range(args.max_iter):
 
         # Regulate PRETRAINING and when to start weighting.
         if gen_iterations < num_pretrain:
+            in_pretraining = True
             weighted = 0
         else:
+            in_pretraining = False 
             weighted = 1
+            lambda_rg = args.lambda_rg  # Weight on hinge loss. If 0, no hinge.
+            lambda_ae = args.lambda_ae
             # Only once, now that we're weighting, redefine all data handlers.
             if gen_iterations == num_pretrain:
                 (trn_dataset, trn_dataset_main, trn_dataset_target, trn_loader,
                     trn_loader_eval, trn_loader_initial, trn_loader_main,
                     trn_loader_target) = (
-                        make_data_handlers('8020'))
+                        make_data_handlers('6040'))
                 data_iter = iter(trn_loader)
                 data_iter_eval = iter(trn_loader_eval)
                 batch_iter = 0
@@ -375,7 +383,6 @@ for global_step in range(args.max_iter):
                             'log_y_eval_proportion1.txt'), 'a') as f:
                         f.write('{:.6f}\n'.format(
                             np.sum(y_eval_labels)/float(len(y_eval_labels))))
-
                 '''
                 # Get probs for x encoding above, using current logistic reg.
                 x_enc_np = f_enc_X_D.cpu().data.numpy()
@@ -412,21 +419,46 @@ for global_step in range(args.max_iter):
 
             mmd2_D = F.relu(mmd2_D)
 
-            # compute rank hinge loss
-            one_side_errD = one_sided(f_enc_X_D.mean(0) - f_enc_Y_D.mean(0))
+            # Thinned hinge loss.
+            try:
+                y_enc_np = f_enc_Y_D.cpu().data.numpy()
+                y_enc_probs_np = clf.predict_proba(y_enc_np)
+                y_enc_p1_np = np.array(
+                    [probs[1] for probs in y_enc_probs_np])
+                thinned_y_enc_np = np.array(
+                    [v for i,v in enumerate(y_enc_np) if
+                        np.random.binomial(1,
+                            1 - args.thinning_scale * y_enc_p1_np[i])])
+                thinned_f_enc_Y_D = Variable(
+                    torch.from_numpy(thinned_y_enc_np).type(
+                        torch.FloatTensor)).cuda()
+                one_side_errD_thinned = one_sided(
+                    f_enc_X_D.mean(0) - thinned_f_enc_Y_D.mean(0))
+            except Exception as e:
+                print('D: Thinning f_enc_Y: Error: {}'.format(e))
+                pdb.set_trace()
+            # Unthinned hinge loss.
+            one_side_errD_unthinned = one_sided(
+                f_enc_X_D.mean(0) - f_enc_Y_D.mean(0))
+            # Choose which hinge loss you want.
+            if in_pretraining:
+                one_side_errD = one_side_errD_unthinned
+            else:
+                one_side_errD = one_side_errD_thinned
 
             # compute L2-loss of AE
             L2_AE_X_D = util.match(x.view(batch_size, -1), f_dec_X_D, 'L2')
             L2_AE_Y_D = util.match(y.view(batch_size, -1), f_dec_Y_D, 'L2')
 
+            # Maximize this error.
             errD = (torch.sqrt(mmd2_D) + lambda_rg * one_side_errD -
                 lambda_AE_X * L2_AE_X_D - lambda_AE_Y * L2_AE_Y_D)
-            errD.backward(mone)
 
             # Skip D step if loading existing, and not pretraining.
             if (num_pretrain == 0 and args.load_existing):
                 pass
             else:
+                errD.backward(mone)
                 optimizerD.step()
 
         # ---------------------------
@@ -515,6 +547,7 @@ for global_step in range(args.max_iter):
                     [probs[1] for probs in y_eval_enc_probs_np_])
                 # Get logistic regr error on x_eval, and class distr on y_eval.
                 x_eval_error = np.mean(abs(x_eval_enc_p1_np - x_eval_labels_np))
+                x_eval_labels_ = clf.predict(x_eval_enc_np)
                 y_eval_labels_ = clf.predict(y_eval_enc_np_)
                 if do_log(gen_iterations):
                     pass
@@ -549,8 +582,33 @@ for global_step in range(args.max_iter):
             mmd2_G = F.relu(mmd2_G)
 
             # compute rank hinge loss
-            one_side_errG = one_sided(f_enc_X.mean(0) - f_enc_Y.mean(0))
+            try:
+                y_enc_np = f_enc_Y.cpu().data.numpy()
+                y_enc_probs_np = clf.predict_proba(y_enc_np)
+                y_enc_p1_np = np.array(
+                    [probs[1] for probs in y_enc_probs_np])
+                thinned_y_enc_np = np.array(
+                    [v for i,v in enumerate(y_enc_np) if
+                        np.random.binomial(1,
+                            1 - args.thinning_scale * y_enc_p1_np[i])])
+                thinned_f_enc_Y = Variable(
+                    torch.from_numpy(thinned_y_enc_np).type(
+                        torch.FloatTensor)).cuda()
+                one_side_errG_thinned = one_sided(
+                    f_enc_X.mean(0) - thinned_f_enc_Y.mean(0))
+            except Exception as e:
+                print('G: Thinning f_enc_Y: Error: {}'.format(e))
+                pdb.set_trace()
+            # Unthinned hinge loss.
+            one_side_errG_unthinned = one_sided(
+                f_enc_X.mean(0) - f_enc_Y.mean(0))
+            # Choose which hinge loss you want.
+            if in_pretraining:
+                one_side_errG = one_side_errG_unthinned
+            else:
+                one_side_errG = one_side_errG_thinned
 
+            # Minimize this error.
             errG = lambda_MMD * torch.sqrt(mmd2_G) + lambda_rg * one_side_errG
             errG.backward(one)
             optimizerG.step()
@@ -637,14 +695,28 @@ for global_step in range(args.max_iter):
                      L2_AE_Y_D.data[0], errD.data[0], errG.data[0],
                      f_enc_X_D.mean().data[0], f_enc_Y_D.mean().data[0],
                      base_module.grad_norm(netD), base_module.grad_norm(netG)))
-            # Try with logging results here.
+            # Save metrics for the run.
             with open(os.path.join(save_dir,
                     'log_x_eval_regression_error.txt'), 'a') as f:
                 f.write('{:.6f}\n'.format(x_eval_error))
             with open(os.path.join(save_dir,
+                    'log_x_eval_proportion1.txt'), 'a') as f:
+                f.write('{:.6f}\n'.format(
+                    np.sum(x_eval_labels_)/float(len(x_eval_labels_))))
+            with open(os.path.join(save_dir,
                     'log_y_eval_proportion1.txt'), 'a') as f:
                 f.write('{:.6f}\n'.format(
                     np.sum(y_eval_labels_)/float(len(y_eval_labels_))))
+            with open(os.path.join(save_dir, 'log_wmmd.txt'), 'a') as f:
+                f.write('{:.6f}\n'.format(mmd2_D.data[0]))
+            with open(os.path.join(save_dir, 'log_ae_real.txt'), 'a') as f:
+                f.write('{:.6f}\n'.format(L2_AE_X_D.data[0]))
+            with open(os.path.join(save_dir, 'log_ae_gen.txt'), 'a') as f:
+                f.write('{:.6f}\n'.format(L2_AE_Y_D.data[0]))
+            with open(os.path.join(save_dir, 'log_hinge_unthinned.txt'), 'a') as f:
+                f.write('{:.6f}\n'.format(one_side_errD_unthinned.data[0]))
+            with open(os.path.join(save_dir, 'log_hinge_thinned.txt'), 'a') as f:
+                f.write('{:.6f}\n'.format(one_side_errD_thinned.data[0]))
             # Save images.
             y_fixed = netG(fixed_noise)
             y_fixed.data = y_fixed.data.mul(0.5).add(0.5)
