@@ -297,6 +297,8 @@ for global_step in range(args.max_iter):
             x_cpu, xlab_cpu = data
             x = Variable(x_cpu.cuda())
             batch_size = x.size(0)
+            if batch_size != args.batch_size:
+                continue
             f_enc_X_D, f_dec_X_D = netD(x)
 
             # Sample from generator and encode.
@@ -379,22 +381,24 @@ for global_step in range(args.max_iter):
                 x_eval_enc_probs_np = clf.predict_proba(x_eval_enc_np)  # clf trained on x_init
                 x_eval_enc_p1_np = np.array(
                     [probs[1] for probs in x_eval_enc_probs_np])
-                # -- Separate metrics for 1s and 0s.
-                x_eval_class1_median = np.median([val for val in
-                    x_eval_enc_p1_np if val >= 0.5])
-                x_eval_class0_median = np.median([val for val in
-                    x_eval_enc_p1_np if val < 0.5])
-                x_eval_np = x_eval_cpu.numpy()
-                x_eval_dec_np = x_eval_dec.cpu().data.numpy()
-                x_eval_1s_np = np.array([val for ind, val in
-                    enumerate(x_eval_np) if x_eval_enc_p1_np[ind] >= 0.5])
-                x_eval_0s_np = np.array([val for ind, val in
-                    enumerate(x_eval_np) if x_eval_enc_p1_np[ind] < 0.5])
-                x_eval_dec_1s_np = np.array([val for ind, val in 
-                    enumerate(x_eval_dec_np) if x_eval_enc_p1_np[ind] >= 0.5])
-                x_eval_dec_0s_np = np.array([val for ind, val in
-                    enumerate(x_eval_dec_np) if x_eval_enc_p1_np[ind] < 0.5])
-                x_eval_1s = Variable(torch.from_numpy(
+                # - Separate metrics for 1s and 0s.
+                # -- Collect prediction probs that would yield class1/class0.
+                x_eval_class1_median = np.median([val for ind, val in  
+                    enumerate(x_eval_enc_p1_np) if x_eval_labels_np[ind] == 1])
+                x_eval_class0_median = np.median([val for ind, val in  
+                    enumerate(x_eval_enc_p1_np) if x_eval_labels_np[ind] == 0])
+                # -- Collect 1s and 0s for data and autoencodings of data.
+                x_eval_np = x_eval_cpu.numpy()  # Data.
+                x_eval_dec_np = x_eval_dec.cpu().data.numpy()  # Autoencodings of data.
+                x_eval_1s_np = np.array([val for ind, val in  # Real 1s.
+                    enumerate(x_eval_np) if x_eval_labels_cpu[ind] == 1])
+                x_eval_0s_np = np.array([val for ind, val in  # Real 0s.
+                    enumerate(x_eval_np) if x_eval_labels_cpu[ind] == 0])
+                x_eval_dec_1s_np = np.array([val for ind, val in  # AE(real1s).
+                    enumerate(x_eval_dec_np) if x_eval_labels_cpu[ind] == 1])
+                x_eval_dec_0s_np = np.array([val for ind, val in  # AE(real0s).
+                    enumerate(x_eval_dec_np) if x_eval_labels_cpu[ind] == 0])
+                x_eval_1s = Variable(torch.from_numpy(  # Convert all to torch vars.
                     x_eval_1s_np).type(torch.FloatTensor)).cuda()
                 x_eval_0s = Variable(torch.from_numpy(
                     x_eval_0s_np).type(torch.FloatTensor)).cuda()
@@ -402,15 +406,16 @@ for global_step in range(args.max_iter):
                     x_eval_dec_1s_np).type(torch.FloatTensor)).cuda()
                 x_eval_dec_0s = Variable(torch.from_numpy(
                     x_eval_dec_0s_np).type(torch.FloatTensor)).cuda()
+                # -- Compute mean prediction error for 1s and 0s.
                 x_eval_error_1s = np.mean([
                     abs(x_eval_enc_p1_np[ind] - x_eval_labels_np[ind]) for
                     ind, val in enumerate(x_eval_labels_np) if val == 1])
                 x_eval_error_0s = np.mean([
                     abs(x_eval_enc_p1_np[ind] - x_eval_labels_np[ind]) for
                     ind, val in enumerate(x_eval_labels_np) if val == 0])
-                # Eval logistic regr using current encoder on new gens, y_eval.
+                # Eval logistic regr using current encoder on new simulations.
                 noise_eval = torch.cuda.FloatTensor(
-                    400, args.nz, 1, 1).normal_(0, 1)
+                    batch_size, args.nz, 1, 1).normal_(0, 1)
                 noise_eval = Variable(noise_eval, volatile=True)  # total freeze netG
                 netG_noise_eval = netG(noise_eval)
                 y_eval = Variable(netG_noise_eval.data)
@@ -420,11 +425,12 @@ for global_step in range(args.max_iter):
                 y_eval_enc_p1_np = np.array(
                     [probs[1] for probs in y_eval_enc_probs_np])
                 # -- Separate metrics for 1s and 0s.
-                y_eval_class1_median = np.median([val for val in
+                # -- Note: classification based on logistic regression prediction.
+                y_eval_class1_median = np.median([val for val in  
                     y_eval_enc_p1_np if val >= 0.5])
                 y_eval_class0_median = np.median([val for val in
                     y_eval_enc_p1_np if val < 0.5])
-                y_eval_np = y_eval.cpu().data.numpy() ##
+                y_eval_np = y_eval.cpu().data.numpy()
                 y_eval_dec_np = y_eval_dec.cpu().data.numpy()
                 y_eval_1s_np = np.array([val for ind, val in
                     enumerate(y_eval_np) if y_eval_enc_p1_np[ind] >= 0.5])
@@ -507,7 +513,8 @@ for global_step in range(args.max_iter):
                     L2_AE_X1_D = util.match(
                         x_eval_1s.view(len(x_eval_1s), -1), x_eval_dec_1s, 'L2')
                 else:
-                    L2_AE_X1_D = 0
+                    L2_AE_X1_D = Variable(torch.from_numpy(np.array([0])).type(
+                        torch.FloatTensor))
             except Exception as e:
                 print('D: Computing x1 ae error. Error: {}'.format(e))
                 pdb.set_trace()
@@ -516,7 +523,8 @@ for global_step in range(args.max_iter):
                     L2_AE_X0_D = util.match(
                         x_eval_0s.view(len(x_eval_0s), -1), x_eval_dec_0s, 'L2')
                 else:
-                    L2_AE_X0_D = 0
+                    L2_AE_X0_D = Variable(torch.from_numpy(np.array([0])).type(
+                        torch.FloatTensor))
             except Exception as e:
                 print('D: Computing x0 ae error. Error: {}'.format(e))
                 pdb.set_trace()
@@ -525,7 +533,8 @@ for global_step in range(args.max_iter):
                     L2_AE_Y1_D = util.match(
                         y_eval_1s.view(len(y_eval_1s), -1), y_eval_dec_1s, 'L2')
                 else:
-                    L2_AE_Y1_D = 0
+                    L2_AE_Y1_D = Variable(torch.from_numpy(np.array([0])).type(
+                        torch.FloatTensor))
             except Exception as e:
                 print('D: Computing y1 ae error. Error: {}'.format(e))
                 pdb.set_trace()
@@ -534,7 +543,8 @@ for global_step in range(args.max_iter):
                     L2_AE_Y0_D = util.match(
                         y_eval_0s.view(len(y_eval_0s), -1), y_eval_dec_0s, 'L2')
                 else:
-                    L2_AE_Y0_D = 0
+                    L2_AE_Y0_D = Variable(torch.from_numpy(np.array([0])).type(
+                        torch.FloatTensor))
             except Exception as e:
                 print('D: Computing y0 ae error. Error: {}'.format(e))
                 pdb.set_trace()
@@ -576,6 +586,8 @@ for global_step in range(args.max_iter):
             x_cpu, _ = data
             x = Variable(x_cpu.cuda())
             batch_size_x = x.size(0)
+            if batch_size_x != args.batch_size:
+                continue
 
             f_enc_X, f_dec_X = netD(x)
 
@@ -667,7 +679,7 @@ for global_step in range(args.max_iter):
                     ind, val in enumerate(x_eval_labels_np) if val == 0])
                 # Eval logistic regr using current encoder on new gens, y_eval.
                 noise_eval = torch.cuda.FloatTensor(
-                    400, args.nz, 1, 1).normal_(0, 1)
+                    batch_size, args.nz, 1, 1).normal_(0, 1)
                 noise_eval = Variable(noise_eval, volatile=True)  # total freeze netG
                 netG_noise_eval = netG(noise_eval)
                 y_eval = Variable(netG_noise_eval.data)
@@ -681,7 +693,7 @@ for global_step in range(args.max_iter):
                     y_eval_enc_p1_np if val >= 0.5])
                 y_eval_class0_median = np.median([val for val in
                     y_eval_enc_p1_np if val < 0.5])
-                y_eval_np = y_eval.cpu().data.numpy() ##
+                y_eval_np = y_eval.cpu().data.numpy()
                 y_eval_dec_np = y_eval_dec.cpu().data.numpy()
                 y_eval_1s_np = np.array([val for ind, val in
                     enumerate(y_eval_np) if y_eval_enc_p1_np[ind] >= 0.5])
