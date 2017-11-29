@@ -104,11 +104,14 @@ cudnn.benchmark = True
 # Get data.
 trn_dataset_8020, trn_dataset_5050, trn_dataset_main, trn_dataset_target = (
     util.get_data(args, train_flag=True))
+trn_dataset_7030, _, _, _ = util.get_data(args, train_flag=True, mix='7030')
 trn_dataset_6040, _, _, _ = util.get_data(args, train_flag=True, mix='6040')
 def make_data_handlers(mix):
-    assert mix in ['8020', '6040', '5050']
+    assert mix in ['8020', '7030', '6040', '5050']
     if mix == '8020':
         trn_dataset = trn_dataset_8020
+    elif mix == '7030':
+        trn_dataset = trn_dataset_7030
     elif mix == '6040':
         trn_dataset = trn_dataset_6040
     elif mix == '5050':
@@ -118,7 +121,7 @@ def make_data_handlers(mix):
     trn_loader_eval = torch.utils.data.DataLoader(trn_dataset,
         batch_size=args.batch_size, shuffle=True, num_workers=int(args.workers))
     trn_loader_initial = torch.utils.data.DataLoader(trn_dataset,
-        batch_size=1000, shuffle=True, num_workers=int(args.workers))
+        batch_size=5000, shuffle=True, num_workers=int(args.workers))
     loader_num = 200
     trn_loader_main = torch.utils.data.DataLoader(trn_dataset_main,
         batch_size=loader_num, shuffle=True, num_workers=int(args.workers))
@@ -127,7 +130,7 @@ def make_data_handlers(mix):
     print('Made data handlers for mix {}'.format(mix))
     return (trn_dataset, trn_dataset_main, trn_dataset_target, trn_loader,
         trn_loader_eval, trn_loader_initial, trn_loader_main, trn_loader_target)
-mix = '6040'
+mix = '5050'
 (trn_dataset, trn_dataset_main, trn_dataset_target, trn_loader, trn_loader_eval,
     trn_loader_initial, trn_loader_main, trn_loader_target) = (
         make_data_handlers(mix))
@@ -205,9 +208,9 @@ optimizerD = torch.optim.RMSprop(netD.parameters(), lr=args.dlr)
 optimizerG = torch.optim.RMSprop(netG.parameters(), lr=args.glr)
 
 # Assign weights to components in objective functions.
-lambda_MMD = 1.0
-lambda_AE_X = 8.0
-lambda_AE_Y = 8.0
+lambda_mmd = 1.0
+lambda_ae_X = 8.0
+lambda_ae_Y = 8.0
 lambda_rg = 16.0
 
 
@@ -254,18 +257,22 @@ for global_step in range(args.max_iter):
         # Regulate PRETRAINING and when to start weighting.
         if gen_iterations < num_pretrain:
             in_pretraining = True
+            skip_autoencoder = False 
             weighted = 0
         else:
             in_pretraining = False 
+            skip_autoencoder = False 
             weighted = 1
+            lambda_mmd = args.lambda_mmd
+            lambda_ae_X = args.lambda_ae
+            lambda_ae_Y = args.lambda_ae
             lambda_rg = args.lambda_rg  # Weight on hinge loss. If 0, no hinge.
-            lambda_ae = args.lambda_ae
             # Only once, now that we're weighting, redefine all data handlers.
             if gen_iterations == num_pretrain:
                 (trn_dataset, trn_dataset_main, trn_dataset_target, trn_loader,
                     trn_loader_eval, trn_loader_initial, trn_loader_main,
                     trn_loader_target) = (
-                        make_data_handlers('6040'))
+                        make_data_handlers('8020'))
                 data_iter = iter(trn_loader)
                 data_iter_eval = iter(trn_loader_eval)
                 batch_iter = 0
@@ -349,41 +356,6 @@ for global_step in range(args.max_iter):
                 x_init_enc_probs_np = clf.predict_proba(x_init_enc_np)
                 x_init_enc_p1_np = np.array(
                     [probs[1] for probs in x_init_enc_probs_np])
-                # Eval logistic regr using current encoder on new data.
-                data_eval = data_iter_eval.next()
-                x_eval_cpu, x_eval_labels_cpu = data_eval
-                x_eval_labels_np = x_eval_labels_cpu.numpy()
-                x_eval = Variable(x_eval_cpu.cuda())
-                batch_size = x_eval.size(0)
-                x_eval_enc, _ = netD(x_eval)
-                x_eval_enc_np = x_eval_enc.cpu().data.numpy()
-                x_eval_enc_probs_np = clf.predict_proba(x_eval_enc_np)  # clf trained on x_init
-                x_eval_enc_p1_np = np.array(
-                    [probs[1] for probs in x_eval_enc_probs_np])
-                # Eval logistic regr using current encoder on new simulations.
-                noise_eval = torch.cuda.FloatTensor(
-                    400, args.nz, 1, 1).normal_(0, 1)
-                noise_eval = Variable(noise_eval, volatile=True)  # total freeze netG
-                netG_noise_eval = netG(noise_eval)
-                y_eval = Variable(netG_noise_eval.data)
-                y_eval_enc, _ = netD(y_eval)
-                y_eval_enc_np = y_eval_enc.cpu().data.numpy()
-                y_eval_enc_probs_np = clf.predict_proba(y_eval_enc_np)  # clf trained on x_init
-                y_eval_enc_p1_np = np.array(
-                    [probs[1] for probs in y_eval_enc_probs_np])
-                # Get logistic regr error on x_eval, and class distr on y_eval.
-                x_eval_error = np.mean(abs(x_eval_enc_p1_np - x_eval_labels_np))
-                y_eval_labels = clf.predict(y_eval_enc_np)
-                '''
-                if do_log(gen_iterations):
-                    with open(os.path.join(save_dir,
-                            'log_x_eval_regression_error.txt'), 'a') as f:
-                        f.write('{:.6f}\n'.format(x_eval_error))
-                    with open(os.path.join(save_dir,
-                            'log_y_eval_proportion1.txt'), 'a') as f:
-                        f.write('{:.6f}\n'.format(
-                            np.sum(y_eval_labels)/float(len(y_eval_labels))))
-                '''
                 # Get probs for x encoding above, using current logistic reg.
                 x_enc_np = f_enc_X_D.cpu().data.numpy()
                 x_enc_probs_np = clf.predict_proba(x_enc_np)
@@ -394,6 +366,86 @@ for global_step in range(args.max_iter):
                 # For test_mix, redefine probs based on true labels.
                 if args.test_mix:
                     x_enc_p1 = Variable(xlab_cpu.type(torch.FloatTensor)).cuda()
+
+                # EVAL COMPUTATIONS.
+                # Eval logistic regr using current encoder on new data, x_eval.
+                data_eval = data_iter_eval.next()
+                x_eval_cpu, x_eval_labels_cpu = data_eval
+                x_eval_labels_np = x_eval_labels_cpu.numpy()
+                x_eval = Variable(x_eval_cpu.cuda())
+                batch_size = x_eval.size(0)
+                x_eval_enc, x_eval_dec = netD(x_eval)
+                x_eval_enc_np = x_eval_enc.cpu().data.numpy()
+                x_eval_enc_probs_np = clf.predict_proba(x_eval_enc_np)  # clf trained on x_init
+                x_eval_enc_p1_np = np.array(
+                    [probs[1] for probs in x_eval_enc_probs_np])
+                # -- Separate metrics for 1s and 0s.
+                x_eval_class1_median = np.median([val for val in
+                    x_eval_enc_p1_np if val >= 0.5])
+                x_eval_class0_median = np.median([val for val in
+                    x_eval_enc_p1_np if val < 0.5])
+                x_eval_np = x_eval_cpu.numpy()
+                x_eval_dec_np = x_eval_dec.cpu().data.numpy()
+                x_eval_1s_np = np.array([val for ind, val in
+                    enumerate(x_eval_np) if x_eval_enc_p1_np[ind] >= 0.5])
+                x_eval_0s_np = np.array([val for ind, val in
+                    enumerate(x_eval_np) if x_eval_enc_p1_np[ind] < 0.5])
+                x_eval_dec_1s_np = np.array([val for ind, val in 
+                    enumerate(x_eval_dec_np) if x_eval_enc_p1_np[ind] >= 0.5])
+                x_eval_dec_0s_np = np.array([val for ind, val in
+                    enumerate(x_eval_dec_np) if x_eval_enc_p1_np[ind] < 0.5])
+                x_eval_1s = Variable(torch.from_numpy(
+                    x_eval_1s_np).type(torch.FloatTensor)).cuda()
+                x_eval_0s = Variable(torch.from_numpy(
+                    x_eval_0s_np).type(torch.FloatTensor)).cuda()
+                x_eval_dec_1s = Variable(torch.from_numpy(
+                    x_eval_dec_1s_np).type(torch.FloatTensor)).cuda()
+                x_eval_dec_0s = Variable(torch.from_numpy(
+                    x_eval_dec_0s_np).type(torch.FloatTensor)).cuda()
+                x_eval_error_1s = np.mean([
+                    abs(x_eval_enc_p1_np[ind] - x_eval_labels_np[ind]) for
+                    ind, val in enumerate(x_eval_labels_np) if val == 1])
+                x_eval_error_0s = np.mean([
+                    abs(x_eval_enc_p1_np[ind] - x_eval_labels_np[ind]) for
+                    ind, val in enumerate(x_eval_labels_np) if val == 0])
+                # Eval logistic regr using current encoder on new gens, y_eval.
+                noise_eval = torch.cuda.FloatTensor(
+                    400, args.nz, 1, 1).normal_(0, 1)
+                noise_eval = Variable(noise_eval, volatile=True)  # total freeze netG
+                netG_noise_eval = netG(noise_eval)
+                y_eval = Variable(netG_noise_eval.data)
+                y_eval_enc, y_eval_dec = netD(y_eval)
+                y_eval_enc_np = y_eval_enc.cpu().data.numpy()
+                y_eval_enc_probs_np = clf.predict_proba(y_eval_enc_np)  # clf trained on x_init
+                y_eval_enc_p1_np = np.array(
+                    [probs[1] for probs in y_eval_enc_probs_np])
+                # -- Separate metrics for 1s and 0s.
+                y_eval_class1_median = np.median([val for val in
+                    y_eval_enc_p1_np if val >= 0.5])
+                y_eval_class0_median = np.median([val for val in
+                    y_eval_enc_p1_np if val < 0.5])
+                y_eval_np = y_eval.cpu().data.numpy() ##
+                y_eval_dec_np = y_eval_dec.cpu().data.numpy()
+                y_eval_1s_np = np.array([val for ind, val in
+                    enumerate(y_eval_np) if y_eval_enc_p1_np[ind] >= 0.5])
+                y_eval_0s_np = np.array([val for ind, val in
+                    enumerate(y_eval_np) if y_eval_enc_p1_np[ind] < 0.5])
+                y_eval_dec_1s_np = np.array([val for ind, val in 
+                    enumerate(y_eval_dec_np) if y_eval_enc_p1_np[ind] >= 0.5])
+                y_eval_dec_0s_np = np.array([val for ind, val in
+                    enumerate(y_eval_dec_np) if y_eval_enc_p1_np[ind] < 0.5])
+                y_eval_1s = Variable(torch.from_numpy(
+                    y_eval_1s_np).type(torch.FloatTensor)).cuda()
+                y_eval_0s = Variable(torch.from_numpy(
+                    y_eval_0s_np).type(torch.FloatTensor)).cuda()
+                y_eval_dec_1s = Variable(torch.from_numpy(
+                    y_eval_dec_1s_np).type(torch.FloatTensor)).cuda()
+                y_eval_dec_0s = Variable(torch.from_numpy(
+                    y_eval_dec_0s_np).type(torch.FloatTensor)).cuda()
+                # Get logistic regr error on x_eval, and class distr on y_eval.
+                x_eval_error = np.mean(abs(x_eval_enc_p1_np - x_eval_labels_np))
+                x_eval_labels = clf.predict(x_eval_enc_np)
+                y_eval_labels = clf.predict(y_eval_enc_np)
 
             # compute biased MMD2 and use ReLU to prevent negative value
             if not weighted:
@@ -441,7 +493,7 @@ for global_step in range(args.max_iter):
             one_side_errD_unthinned = one_sided(
                 f_enc_X_D.mean(0) - f_enc_Y_D.mean(0))
             # Choose which hinge loss you want.
-            if in_pretraining:
+            if not weighted:
                 one_side_errD = one_side_errD_unthinned
             else:
                 one_side_errD = one_side_errD_thinned
@@ -449,13 +501,54 @@ for global_step in range(args.max_iter):
             # compute L2-loss of AE
             L2_AE_X_D = util.match(x.view(batch_size, -1), f_dec_X_D, 'L2')
             L2_AE_Y_D = util.match(y.view(batch_size, -1), f_dec_Y_D, 'L2')
+            # Also compute AE loss on subsets of zeros and ones.
+            try:
+                if len(x_eval_1s) or len(x_eval_dec_1s):
+                    L2_AE_X1_D = util.match(
+                        x_eval_1s.view(len(x_eval_1s), -1), x_eval_dec_1s, 'L2')
+                else:
+                    L2_AE_X1_D = 0
+            except Exception as e:
+                print('D: Computing x1 ae error. Error: {}'.format(e))
+                pdb.set_trace()
+            try:
+                if len(x_eval_0s) or len(x_eval_dec_0s):
+                    L2_AE_X0_D = util.match(
+                        x_eval_0s.view(len(x_eval_0s), -1), x_eval_dec_0s, 'L2')
+                else:
+                    L2_AE_X0_D = 0
+            except Exception as e:
+                print('D: Computing x0 ae error. Error: {}'.format(e))
+                pdb.set_trace()
+            try:
+                if len(y_eval_1s) or len(y_eval_dec_1s):
+                    L2_AE_Y1_D = util.match(
+                        y_eval_1s.view(len(y_eval_1s), -1), y_eval_dec_1s, 'L2')
+                else:
+                    L2_AE_Y1_D = 0
+            except Exception as e:
+                print('D: Computing y1 ae error. Error: {}'.format(e))
+                pdb.set_trace()
+            try:
+                if len(y_eval_0s) or len(y_eval_dec_0s):
+                    L2_AE_Y0_D = util.match(
+                        y_eval_0s.view(len(y_eval_0s), -1), y_eval_dec_0s, 'L2')
+                else:
+                    L2_AE_Y0_D = 0
+            except Exception as e:
+                print('D: Computing y0 ae error. Error: {}'.format(e))
+                pdb.set_trace()
 
             # Maximize this error.
-            errD = (torch.sqrt(mmd2_D) + lambda_rg * one_side_errD -
-                lambda_AE_X * L2_AE_X_D - lambda_AE_Y * L2_AE_Y_D)
+            errD = (lambda_mmd * torch.sqrt(mmd2_D) +
+                lambda_rg * one_side_errD -
+                lambda_ae_X * L2_AE_X_D -
+                lambda_ae_Y * L2_AE_Y_D)
 
             # Skip D step if loading existing, and not pretraining.
             if (num_pretrain == 0 and args.load_existing):
+                pass
+            elif skip_autoencoder:
                 pass
             else:
                 errD.backward(mone)
@@ -523,34 +616,6 @@ for global_step in range(args.max_iter):
                 x_init_enc_probs_np = clf.predict_proba(x_init_enc_np)
                 x_init_enc_p1_np = np.array(
                     [probs[1] for probs in x_init_enc_probs_np])
-                # Eval logistic regr using current encoder on new data.
-                data_eval = data_iter_eval.next()
-                x_eval_cpu, x_eval_labels_cpu = data_eval
-                x_eval_labels_np = x_eval_labels_cpu.numpy()
-                x_eval = Variable(x_eval_cpu.cuda())
-                batch_size_x_eval = x_eval.size(0)
-                x_eval_enc, _ = netD(x_eval)
-                x_eval_enc_np = x_eval_enc.cpu().data.numpy()
-                x_eval_enc_probs_np = clf.predict_proba(x_eval_enc_np)  # clf trained on x_init
-                x_eval_enc_p1_np = np.array(
-                    [probs[1] for probs in x_eval_enc_probs_np])
-                # Eval logistic regr using current encoder on new simulations.
-                noise_eval = torch.cuda.FloatTensor(
-                    400, args.nz, 1, 1).normal_(0, 1)
-                noise_eval = Variable(noise_eval, volatile=True)  # total freeze netG
-                netG_noise_eval_ = netG(noise_eval)  # Tagging all y vals to trace explicitly to section with vutil save.
-                y_eval_ = Variable(netG_noise_eval_.data)
-                y_eval_enc_, _ = netD(y_eval_)
-                y_eval_enc_np_ = y_eval_enc_.cpu().data.numpy()
-                y_eval_enc_probs_np_ = clf.predict_proba(y_eval_enc_np_)  # clf trained on x_init
-                y_eval_enc_p1_np_ = np.array(
-                    [probs[1] for probs in y_eval_enc_probs_np_])
-                # Get logistic regr error on x_eval, and class distr on y_eval.
-                x_eval_error = np.mean(abs(x_eval_enc_p1_np - x_eval_labels_np))
-                x_eval_labels_ = clf.predict(x_eval_enc_np)
-                y_eval_labels_ = clf.predict(y_eval_enc_np_)
-                if do_log(gen_iterations):
-                    pass
                 # Get probs for x encoding above, using current logistic reg.
                 x_enc_np = f_enc_X.cpu().data.numpy()
                 x_enc_probs_np = clf.predict_proba(x_enc_np)
@@ -558,6 +623,86 @@ for global_step in range(args.max_iter):
                     [probs[1] for probs in x_enc_probs_np])
                 x_enc_p1 = Variable(torch.from_numpy(x_enc_p1_np).type(
                     torch.FloatTensor)).cuda()
+
+                # EVAL COMPUTATIONS.
+                # Eval logistic regr using current encoder on new data, x_eval.
+                data_eval = data_iter_eval.next()
+                x_eval_cpu, x_eval_labels_cpu = data_eval
+                x_eval_labels_np = x_eval_labels_cpu.numpy()
+                x_eval = Variable(x_eval_cpu.cuda())
+                batch_size = x_eval.size(0)
+                x_eval_enc, x_eval_dec = netD(x_eval)
+                x_eval_enc_np = x_eval_enc.cpu().data.numpy()
+                x_eval_enc_probs_np = clf.predict_proba(x_eval_enc_np)  # clf trained on x_init
+                x_eval_enc_p1_np = np.array(
+                    [probs[1] for probs in x_eval_enc_probs_np])
+                # -- Separate metrics for 1s and 0s.
+                x_eval_class1_median = np.median([val for val in
+                    x_eval_enc_p1_np if val >= 0.5])
+                x_eval_class0_median = np.median([val for val in
+                    x_eval_enc_p1_np if val < 0.5])
+                x_eval_np = x_eval_cpu.numpy()
+                x_eval_dec_np = x_eval_dec.cpu().data.numpy()
+                x_eval_1s_np = np.array([val for ind, val in
+                    enumerate(x_eval_np) if x_eval_enc_p1_np[ind] >= 0.5])
+                x_eval_0s_np = np.array([val for ind, val in
+                    enumerate(x_eval_np) if x_eval_enc_p1_np[ind] < 0.5])
+                x_eval_dec_1s_np = np.array([val for ind, val in 
+                    enumerate(x_eval_dec_np) if x_eval_enc_p1_np[ind] >= 0.5])
+                x_eval_dec_0s_np = np.array([val for ind, val in
+                    enumerate(x_eval_dec_np) if x_eval_enc_p1_np[ind] < 0.5])
+                x_eval_1s = Variable(torch.from_numpy(
+                    x_eval_1s_np).type(torch.FloatTensor)).cuda()
+                x_eval_0s = Variable(torch.from_numpy(
+                    x_eval_0s_np).type(torch.FloatTensor)).cuda()
+                x_eval_dec_1s = Variable(torch.from_numpy(
+                    x_eval_dec_1s_np).type(torch.FloatTensor)).cuda()
+                x_eval_dec_0s = Variable(torch.from_numpy(
+                    x_eval_dec_0s_np).type(torch.FloatTensor)).cuda()
+                x_eval_error_1s = np.mean([
+                    abs(x_eval_enc_p1_np[ind] - x_eval_labels_np[ind]) for
+                    ind, val in enumerate(x_eval_labels_np) if val == 1])
+                x_eval_error_0s = np.mean([
+                    abs(x_eval_enc_p1_np[ind] - x_eval_labels_np[ind]) for
+                    ind, val in enumerate(x_eval_labels_np) if val == 0])
+                # Eval logistic regr using current encoder on new gens, y_eval.
+                noise_eval = torch.cuda.FloatTensor(
+                    400, args.nz, 1, 1).normal_(0, 1)
+                noise_eval = Variable(noise_eval, volatile=True)  # total freeze netG
+                netG_noise_eval = netG(noise_eval)
+                y_eval = Variable(netG_noise_eval.data)
+                y_eval_enc, y_eval_dec = netD(y_eval)
+                y_eval_enc_np = y_eval_enc.cpu().data.numpy()
+                y_eval_enc_probs_np = clf.predict_proba(y_eval_enc_np)  # clf trained on x_init
+                y_eval_enc_p1_np = np.array(
+                    [probs[1] for probs in y_eval_enc_probs_np])
+                # -- Separate metrics for 1s and 0s.
+                y_eval_class1_median = np.median([val for val in
+                    y_eval_enc_p1_np if val >= 0.5])
+                y_eval_class0_median = np.median([val for val in
+                    y_eval_enc_p1_np if val < 0.5])
+                y_eval_np = y_eval.cpu().data.numpy() ##
+                y_eval_dec_np = y_eval_dec.cpu().data.numpy()
+                y_eval_1s_np = np.array([val for ind, val in
+                    enumerate(y_eval_np) if y_eval_enc_p1_np[ind] >= 0.5])
+                y_eval_0s_np = np.array([val for ind, val in
+                    enumerate(y_eval_np) if y_eval_enc_p1_np[ind] < 0.5])
+                y_eval_dec_1s_np = np.array([val for ind, val in 
+                    enumerate(y_eval_dec_np) if y_eval_enc_p1_np[ind] >= 0.5])
+                y_eval_dec_0s_np = np.array([val for ind, val in
+                    enumerate(y_eval_dec_np) if y_eval_enc_p1_np[ind] < 0.5])
+                y_eval_1s = Variable(torch.from_numpy(
+                    y_eval_1s_np).type(torch.FloatTensor)).cuda()
+                y_eval_0s = Variable(torch.from_numpy(
+                    y_eval_0s_np).type(torch.FloatTensor)).cuda()
+                y_eval_dec_1s = Variable(torch.from_numpy(
+                    y_eval_dec_1s_np).type(torch.FloatTensor)).cuda()
+                y_eval_dec_0s = Variable(torch.from_numpy(
+                    y_eval_dec_0s_np).type(torch.FloatTensor)).cuda()
+                # Get logistic regr error on x_eval, and class distr on y_eval.
+                x_eval_error = np.mean(abs(x_eval_enc_p1_np - x_eval_labels_np))
+                x_eval_labels = clf.predict(x_eval_enc_np)
+                y_eval_labels = clf.predict(y_eval_enc_np)
 
             # compute biased MMD2 and use ReLU to prevent negative value
             if not weighted:
@@ -582,34 +727,34 @@ for global_step in range(args.max_iter):
             mmd2_G = F.relu(mmd2_G)
 
             # compute rank hinge loss
-            try:
-                y_enc_np = f_enc_Y.cpu().data.numpy()
-                y_enc_probs_np = clf.predict_proba(y_enc_np)
-                y_enc_p1_np = np.array(
-                    [probs[1] for probs in y_enc_probs_np])
-                thinned_y_enc_np = np.array(
-                    [v for i,v in enumerate(y_enc_np) if
-                        np.random.binomial(1,
-                            1 - args.thinning_scale * y_enc_p1_np[i])])
-                thinned_f_enc_Y = Variable(
-                    torch.from_numpy(thinned_y_enc_np).type(
-                        torch.FloatTensor)).cuda()
-                one_side_errG_thinned = one_sided(
-                    f_enc_X.mean(0) - thinned_f_enc_Y.mean(0))
-            except Exception as e:
-                print('G: Thinning f_enc_Y: Error: {}'.format(e))
-                pdb.set_trace()
             # Unthinned hinge loss.
             one_side_errG_unthinned = one_sided(
                 f_enc_X.mean(0) - f_enc_Y.mean(0))
             # Choose which hinge loss you want.
-            if in_pretraining:
+            if not weighted:
                 one_side_errG = one_side_errG_unthinned
             else:
+                try:
+                    y_enc_np = f_enc_Y.cpu().data.numpy()
+                    y_enc_probs_np = clf.predict_proba(y_enc_np)
+                    y_enc_p1_np = np.array(
+                        [probs[1] for probs in y_enc_probs_np])
+                    thinned_y_enc_np = np.array(
+                        [v for i,v in enumerate(y_enc_np) if
+                            np.random.binomial(1,
+                                1 - args.thinning_scale * y_enc_p1_np[i])])
+                    thinned_f_enc_Y = Variable(
+                        torch.from_numpy(thinned_y_enc_np).type(
+                            torch.FloatTensor)).cuda()
+                    one_side_errG_thinned = one_sided(
+                        f_enc_X.mean(0) - thinned_f_enc_Y.mean(0))
+                except Exception as e:
+                    print('G: Thinning f_enc_Y: Error: {}'.format(e))
+                    pdb.set_trace()
                 one_side_errG = one_side_errG_thinned
 
             # Minimize this error.
-            errG = lambda_MMD * torch.sqrt(mmd2_G) + lambda_rg * one_side_errG
+            errG = lambda_mmd * torch.sqrt(mmd2_G) + lambda_rg * one_side_errG
             errG.backward(one)
             optimizerG.step()
 
@@ -624,14 +769,14 @@ for global_step in range(args.max_iter):
          
         # Do diagnostics with given autoencoder.
         if args.diagnostic:
-            if gen_iterations == 10000:
+            if gen_iterations == 2000:
                 # Compare MMDs of 50/50 data with various data mixes.
-                x_enc_5050 = f_enc_X
-                y_enc_5050 = f_enc_Y
-                mmds_x5050_mix = []
-                mmds_y5050_mix = []
-                wmmds_x5050_mix = []
-                wmmds_y5050_mix = []
+                x_enc = f_enc_X
+                y_enc = f_enc_Y
+                mmds_x_mix = []
+                mmds_y_mix = []
+                wmmds_x_mix = []
+                wmmds_y_mix = []
                 for mix in ['1090', '2080', '3070', '4060', '5050', '6040', '7030',
                         '8020', '9010']:
                     # Get data mix.
@@ -643,36 +788,36 @@ for global_step in range(args.max_iter):
                     batch_mix, _ = iter(trn_loader_mix).next()
                     x_enc_mix, _ = netD(Variable(batch_mix.cuda()))
                     # Get thinning fn values for 50/50 x, and for 50/50 y. 
-                    x_enc_5050_np = x_enc_5050.cpu().data.numpy()  # For x_enc.
-                    x_enc_5050_probs_np = clf.predict_proba(x_enc_5050_np)
-                    x_enc_5050_p1_np = np.array(
-                        [probs[1] for probs in x_enc_5050_probs_np])
-                    x_enc_5050_p1 = Variable(torch.from_numpy(
-                        x_enc_5050_p1_np).type(torch.FloatTensor)).cuda()
-                    y_enc_5050_np = y_enc_5050.cpu().data.numpy()  # For y_enc.
-                    y_enc_5050_probs_np = clf.predict_proba(y_enc_5050_np)
-                    y_enc_5050_p1_np = np.array(
-                        [probs[1] for probs in y_enc_5050_probs_np])
-                    y_enc_5050_p1 = Variable(torch.from_numpy(
-                        y_enc_5050_p1_np).type(torch.FloatTensor)).cuda()
+                    x_enc_np = x_enc.cpu().data.numpy()  # For x_enc.
+                    x_enc_probs_np = clf.predict_proba(x_enc_np)
+                    x_enc_p1_np = np.array(
+                        [probs[1] for probs in x_enc_probs_np])
+                    x_enc_p1 = Variable(torch.from_numpy(
+                        x_enc_p1_np).type(torch.FloatTensor)).cuda()
+                    y_enc_np = y_enc.cpu().data.numpy()  # For y_enc.
+                    y_enc_probs_np = clf.predict_proba(y_enc_np)
+                    y_enc_p1_np = np.array(
+                        [probs[1] for probs in y_enc_probs_np])
+                    y_enc_p1 = Variable(torch.from_numpy(
+                        y_enc_p1_np).type(torch.FloatTensor)).cuda()
                     # Compute and store mmd2 for each case.
-                    mmd_x5050_mix = mix_rbf_mmd2(x_enc_5050, x_enc_mix, sigma_list)
-                    mmd_y5050_mix = mix_rbf_mmd2(y_enc_5050, x_enc_mix, sigma_list)
-                    wmmd_x5050_mix = mix_rbf_mmd2_weighted(
-                        x_enc_5050, x_enc_mix, sigma_list, args.exp_const,
-                        args.thinning_scale, x_enc_p1=x_enc_5050_p1)
-                    wmmd_y5050_mix = mix_rbf_mmd2_weighted(
-                        y_enc_5050, x_enc_mix, sigma_list, args.exp_const,
-                        args.thinning_scale, x_enc_p1=y_enc_5050_p1)
-                    mmds_x5050_mix.append(mmd_x5050_mix)
-                    mmds_y5050_mix.append(mmd_y5050_mix)
-                    wmmds_x5050_mix.append(wmmd_x5050_mix)
-                    wmmds_y5050_mix.append(wmmd_y5050_mix)
+                    mmd_x_mix = mix_rbf_mmd2(x_enc, x_enc_mix, sigma_list)
+                    mmd_y_mix = mix_rbf_mmd2(y_enc, x_enc_mix, sigma_list)
+                    wmmd_x_mix = mix_rbf_mmd2_weighted(
+                        x_enc, x_enc_mix, sigma_list, args.exp_const,
+                        args.thinning_scale, x_enc_p1=x_enc_p1)
+                    wmmd_y_mix = mix_rbf_mmd2_weighted(
+                        y_enc, x_enc_mix, sigma_list, args.exp_const,
+                        args.thinning_scale, x_enc_p1=y_enc_p1)
+                    mmds_x_mix.append(mmd_x_mix)
+                    mmds_y_mix.append(mmd_y_mix)
+                    wmmds_x_mix.append(wmmd_x_mix)
+                    wmmds_y_mix.append(wmmd_y_mix)
 
-                mmds_xvm = [t.cpu().data.numpy()[0] for t in mmds_x5050_mix]
-                mmds_yvm = [t.cpu().data.numpy()[0] for t in mmds_y5050_mix]
-                wmmds_xvm = [t.cpu().data.numpy()[0] for t in wmmds_x5050_mix]
-                wmmds_yvm = [t.cpu().data.numpy()[0] for t in wmmds_y5050_mix]
+                mmds_xvm = [t.cpu().data.numpy()[0] for t in mmds_x_mix]
+                mmds_yvm = [t.cpu().data.numpy()[0] for t in mmds_y_mix]
+                wmmds_xvm = [t.cpu().data.numpy()[0] for t in wmmds_x_mix]
+                wmmds_yvm = [t.cpu().data.numpy()[0] for t in wmmds_y_mix]
                 np.save(os.path.join(save_dir, 'mmds_xvm.npy'), mmds_xvm)
                 np.save(os.path.join(save_dir, 'mmds_yvm.npy'), mmds_yvm)
                 np.save(os.path.join(save_dir, 'wmmds_xvm.npy'), wmmds_xvm)
@@ -700,19 +845,45 @@ for global_step in range(args.max_iter):
                     'log_x_eval_regression_error.txt'), 'a') as f:
                 f.write('{:.6f}\n'.format(x_eval_error))
             with open(os.path.join(save_dir,
+                    'log_x_eval_regression_error_1s.txt'), 'a') as f:
+                f.write('{:.6f}\n'.format(x_eval_error_1s))
+            with open(os.path.join(save_dir,
+                    'log_x_eval_regression_error_0s.txt'), 'a') as f:
+                f.write('{:.6f}\n'.format(x_eval_error_0s))
+            with open(os.path.join(save_dir,
                     'log_x_eval_proportion1.txt'), 'a') as f:
                 f.write('{:.6f}\n'.format(
-                    np.sum(x_eval_labels_)/float(len(x_eval_labels_))))
+                    np.sum(x_eval_labels)/float(len(x_eval_labels))))
             with open(os.path.join(save_dir,
                     'log_y_eval_proportion1.txt'), 'a') as f:
                 f.write('{:.6f}\n'.format(
-                    np.sum(y_eval_labels_)/float(len(y_eval_labels_))))
+                    np.sum(y_eval_labels)/float(len(y_eval_labels))))
             with open(os.path.join(save_dir, 'log_wmmd.txt'), 'a') as f:
                 f.write('{:.6f}\n'.format(mmd2_D.data[0]))
             with open(os.path.join(save_dir, 'log_ae_real.txt'), 'a') as f:
                 f.write('{:.6f}\n'.format(L2_AE_X_D.data[0]))
+            with open(os.path.join(save_dir, 'log_ae_real1.txt'), 'a') as f:
+                f.write('{:.6f}\n'.format(L2_AE_X1_D.data[0]))
+            with open(os.path.join(save_dir, 'log_ae_real0.txt'), 'a') as f:
+                f.write('{:.6f}\n'.format(L2_AE_X0_D.data[0]))
             with open(os.path.join(save_dir, 'log_ae_gen.txt'), 'a') as f:
                 f.write('{:.6f}\n'.format(L2_AE_Y_D.data[0]))
+            with open(os.path.join(save_dir, 'log_ae_gen1.txt'), 'a') as f:
+                f.write('{:.6f}\n'.format(L2_AE_Y1_D.data[0]))
+            with open(os.path.join(save_dir, 'log_ae_gen0.txt'), 'a') as f:
+                f.write('{:.6f}\n'.format(L2_AE_Y0_D.data[0]))
+            with open(os.path.join(save_dir,
+                    'log_x_eval_median_thinfn_1s.txt'), 'a') as f:
+                f.write('{:.6f}\n'.format(x_eval_class1_median))
+            with open(os.path.join(save_dir,
+                    'log_x_eval_median_thinfn_0s.txt'), 'a') as f:
+                f.write('{:.6f}\n'.format(x_eval_class0_median))
+            with open(os.path.join(save_dir,
+                    'log_y_eval_median_thinfn_1s.txt'), 'a') as f:
+                f.write('{:.6f}\n'.format(y_eval_class1_median))
+            with open(os.path.join(save_dir,
+                    'log_y_eval_median_thinfn_0s.txt'), 'a') as f:
+                f.write('{:.6f}\n'.format(y_eval_class0_median))
             with open(os.path.join(save_dir, 'log_hinge_unthinned.txt'), 'a') as f:
                 f.write('{:.6f}\n'.format(one_side_errD_unthinned.data[0]))
             with open(os.path.join(save_dir, 'log_hinge_thinned.txt'), 'a') as f:
@@ -720,7 +891,7 @@ for global_step in range(args.max_iter):
             # Save images.
             y_fixed = netG(fixed_noise)
             y_fixed.data = y_fixed.data.mul(0.5).add(0.5)
-            y_eval = netG_noise_eval_[:64]  # Eval was on full set, but only graph 64.
+            y_eval = netG_noise_eval[:64]  # Eval was on full set, but only graph 64.
             y_eval.data = y_eval.data.mul(0.5).add(0.5)
             f_dec_X_D = f_dec_X_D.view(f_dec_X_D.size(0), args.nc,
                                        args.image_size, args.image_size)

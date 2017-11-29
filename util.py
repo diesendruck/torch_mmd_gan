@@ -18,7 +18,6 @@ from mmd import mix_rbf_mmd2_weighted
 
 def get_args(parser):
     parser.add_argument('--test_mix', type=str, default='', choices=['', '1090', '2080', '3070', '4060', '5050', '6040', '7030', '8020', '9010'])
-    parser.add_argument('--pretrain_mix', type=str, default='6040', choices=['5050', '6040', '8020'])
     parser.add_argument('--dataset', type=str, default='mnist', help='mnist | cifar10 | cifar100 | lsun | imagenet | folder | lfw ')
     parser.add_argument('--dataroot', default='./data/mnist', help='path to dataset')
     parser.add_argument('--workers', type=int, help='number of data loading workers', default=4)
@@ -28,9 +27,9 @@ def get_args(parser):
     parser.add_argument('--nc', type=int, default=1, help='number of channel')
     parser.add_argument('--nz', type=int, default=10, help='size of the latent z vector')
     parser.add_argument('--max_iter', type=int, default=25500, help='number of generator updates to train for')
-    parser.add_argument('--lambda_mmd', type=float, default=1.0, help='scale factor for MMD, exclusively in errG')
-    parser.add_argument('--lambda_rg', type=float, default=1.0, help='scale factor for hinge')
-    parser.add_argument('--lambda_ae', type=float, default=8.0, help='scale factor for autoencoder')
+    parser.add_argument('--lambda_mmd', type=float, default=1.0, help='post-training flags, scale factor for MMD, exclusively in errG')
+    parser.add_argument('--lambda_ae', type=float, default=8.0, help='post-training flags, scale factor for autoencoder')
+    parser.add_argument('--lambda_rg', type=float, default=16.0, help='post-training flags, scale factor for hinge')
     parser.add_argument('--glr', type=float, default=0.00005, help='learning rate, default=0.00005')
     parser.add_argument('--dlr', type=float, default=0.00005, help='learning rate, default=0.00005')
     parser.add_argument('--netG', default='', help="path to netG (to continue training)")
